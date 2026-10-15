@@ -4979,7 +4979,6 @@ router.post('/invoices/:id/pay', requireCustomerApiAuth, async (req, res) => {
   const configuredGateway = paymentSvc.resolveConfiguredGatewayForAmount(settings, inv.amount) || 'tripay';
   const reqGateway = req.body.gateway ? String(req.body.gateway).toLowerCase() : null;
   const selectedGateway = reqGateway || configuredGateway;
-  const method = req.body.method || 'QRIS';
 
   if (selectedGateway === 'qris_static' || String(method).toUpperCase() === 'QRIS_STATIC') {
     const qrisInfo = ensureCustomerApiInvoiceQrisUnique(inv);
