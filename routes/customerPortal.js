@@ -439,8 +439,10 @@ function isQrisAmountAvailable(amount, opts = {}) {
   const ord = db.prepare('SELECT id FROM public_voucher_orders WHERE status=? AND qris_amount_unique=? AND id!=? LIMIT 1').get('pending', amt, excludeVoucherOrderId);
   if (ord && ord.id) return false;
 
-  const topup = db.prepare('SELECT id FROM customer_topup_requests WHERE status=? AND qris_amount_unique=? AND id!=? LIMIT 1').get('pending', amt, excludeTopupId);
-  if (topup && topup.id) return false;
+  try {
+    const topup = db.prepare('SELECT id FROM customer_topup_requests WHERE status=? AND qris_amount_unique=? AND id!=? LIMIT 1').get('pending', amt, excludeTopupId);
+    if (topup && topup.id) return false;
+  } catch (e) {}
 
   return true;
 }

@@ -264,28 +264,74 @@ const updateWebhookPaymentNotifMatchDonation = db.prepare(`
   WHERE id=?
 `);
 
-const selectTopupOrderByUniqueAmount = db.prepare(`
-  SELECT id, customer_id, amount, qris_amount_unique, qris_unique_code, status
-  FROM customer_topup_requests
-  WHERE status = 'pending' AND (qris_amount_unique = ? OR (qris_amount_unique IS NULL AND amount = ?))
-  ORDER BY id DESC
-  LIMIT 2
-`);
+// Safe migration & preparation for customer_topup_requests
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS customer_topup_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL,
+      amount INTEGER NOT NULL DEFAULT 0,
+      payment_gateway TEXT DEFAULT '',
+      payment_order_id TEXT DEFAULT '',
+      payment_link TEXT DEFAULT '',
+      payment_reference TEXT DEFAULT '',
+      payment_payload TEXT,
+      payment_expires_at DATETIME,
+      qris_unique_code INTEGER,
+      qris_amount_unique INTEGER,
+      qris_assigned_at DATETIME,
+      qris_paid_notif_id INTEGER,
+      status TEXT DEFAULT 'pending',
+      paid_at DATETIME,
+      created_at DATETIME DEFAULT (NOW_LOCAL()),
+      updated_at DATETIME DEFAULT (NOW_LOCAL())
+    );
+  `);
+} catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_unique_code INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_amount_unique INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_assigned_at DATETIME"); } catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_paid_notif_id INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE webhook_payment_notifs ADD COLUMN matched_topup_request_id INTEGER"); } catch (e) {}
 
-const markTopupPaid = db.prepare(`
-  UPDATE customer_topup_requests
-  SET status='paid',
-      paid_at=NOW_LOCAL(),
-      qris_paid_notif_id=?,
-      updated_at=NOW_LOCAL()
-  WHERE id=?
-`);
+let selectTopupOrderByUniqueAmount = null;
+let markTopupPaid = null;
+let updateWebhookPaymentNotifMatchTopup = null;
 
-const updateWebhookPaymentNotifMatchTopup = db.prepare(`
-  UPDATE webhook_payment_notifs
-  SET matched_topup_request_id=?
-  WHERE id=?
-`);
+try {
+  selectTopupOrderByUniqueAmount = db.prepare(`
+    SELECT id, customer_id, amount, qris_amount_unique, qris_unique_code, status
+    FROM customer_topup_requests
+    WHERE status = 'pending' AND (qris_amount_unique = ? OR (qris_amount_unique IS NULL AND amount = ?))
+    ORDER BY id DESC
+    LIMIT 2
+  `);
+} catch (err) {
+  logger.error('Failed to prepare selectTopupOrderByUniqueAmount: ' + (err && err.message ? err.message : String(err)));
+}
+
+try {
+  markTopupPaid = db.prepare(`
+    UPDATE customer_topup_requests
+    SET status='paid',
+        paid_at=NOW_LOCAL(),
+        qris_paid_notif_id=?,
+        updated_at=NOW_LOCAL()
+    WHERE id=?
+  `);
+} catch (err) {
+  logger.error('Failed to prepare markTopupPaid: ' + (err && err.message ? err.message : String(err)));
+}
+
+try {
+  updateWebhookPaymentNotifMatchTopup = db.prepare(`
+    UPDATE webhook_payment_notifs
+    SET matched_topup_request_id=?
+    WHERE id=?
+  `);
+} catch (err) {
+  logger.error('Failed to prepare updateWebhookPaymentNotifMatchTopup: ' + (err && err.message ? err.message : String(err)));
+}
 
 const markInvoicePaidAppendNote = db.prepare(`
   UPDATE invoices
@@ -898,7 +944,7 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
         const invCandidates = selectInvoiceByUniqueAmount.all(amount);
         const vCandidates = selectVoucherOrderByUniqueAmount.all(amount);
         const dCandidates = selectDonationOrderByUniqueAmount.all(amount);
-        const tCandidates = selectTopupOrderByUniqueAmount.all(amount, amount);
+        const tCandidates = selectTopupOrderByUniqueAmount ? selectTopupOrderByUniqueAmount.all(amount, amount) : [];
         const totalCandidates = (Array.isArray(invCandidates) ? invCandidates.length : 0) + 
                                 (Array.isArray(vCandidates) ? vCandidates.length : 0) +
                                 (Array.isArray(dCandidates) ? dCandidates.length : 0) +
@@ -980,11 +1026,15 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
             const custId = Number(topup.customer_id || 0);
             const baseAmount = Number(topup.amount || 0);
             if (topupId > 0 && custId > 0 && baseAmount > 0) {
-              markTopupPaid.run(notifId || null, topupId);
+              if (markTopupPaid) {
+                try { markTopupPaid.run(notifId || null, topupId); } catch (e) {
+                  logger.error(`[WEBHOOK][payment-notif] markTopupPaid error: ${e?.message || e}`);
+                }
+              }
               matchedTopupRequestId = topupId;
               logger.info(`[WEBHOOK][payment-notif] MATCH customer_topup=${topupId} amount=${amount} baseAmount=${baseAmount}`);
 
-              if (notifId) {
+              if (notifId && updateWebhookPaymentNotifMatchTopup) {
                 try { updateWebhookPaymentNotifMatchTopup.run(topupId, notifId); } catch {}
               }
 

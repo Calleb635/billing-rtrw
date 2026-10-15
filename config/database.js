@@ -781,6 +781,13 @@ try { db.exec("ALTER TABLE public_voucher_orders ADD COLUMN qris_assigned_at DAT
 try { db.exec("ALTER TABLE public_voucher_orders ADD COLUMN qris_paid_notif_id INTEGER"); } catch (e) {}
 try { db.exec("ALTER TABLE public_voucher_orders ADD COLUMN proof_url TEXT DEFAULT ''"); } catch (e) {}
 
+// Kolom untuk QRIS pada top-up pelanggan
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_unique_code INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_amount_unique INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_assigned_at DATETIME"); } catch (e) {}
+try { db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_paid_notif_id INTEGER"); } catch (e) {}
+try { db.exec("ALTER TABLE webhook_payment_notifs ADD COLUMN matched_topup_request_id INTEGER"); } catch (e) {}
+
 // Kolom untuk Login OLT (Web/API)
 try { db.exec("ALTER TABLE olts ADD COLUMN web_user TEXT DEFAULT 'admin'"); } catch (e) {}
 try { db.exec("ALTER TABLE olts ADD COLUMN web_password TEXT DEFAULT 'admin'"); } catch (e) {}
@@ -1167,31 +1174,6 @@ try {
   }
 } catch(e) {
   console.error('Failed to migrate public_donation_orders:', e);
-}
-
-try {
-  const topupCols = db.prepare("PRAGMA table_info(customer_topup_requests)").all();
-  if (topupCols.length > 0) {
-    if (!topupCols.some(c => c.name === 'qris_unique_code')) {
-      db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_unique_code INTEGER");
-    }
-    if (!topupCols.some(c => c.name === 'qris_amount_unique')) {
-      db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_amount_unique INTEGER");
-    }
-    if (!topupCols.some(c => c.name === 'qris_assigned_at')) {
-      db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_assigned_at DATETIME");
-    }
-    if (!topupCols.some(c => c.name === 'qris_paid_notif_id')) {
-      db.exec("ALTER TABLE customer_topup_requests ADD COLUMN qris_paid_notif_id INTEGER");
-    }
-  }
-
-  const notifCols = db.prepare("PRAGMA table_info(webhook_payment_notifs)").all();
-  if (notifCols.length > 0 && !notifCols.some(c => c.name === 'matched_topup_request_id')) {
-    db.exec("ALTER TABLE webhook_payment_notifs ADD COLUMN matched_topup_request_id INTEGER");
-  }
-} catch(e) {
-  console.error('Failed to migrate customer_topup_requests columns:', e);
 }
 
 module.exports = db;
