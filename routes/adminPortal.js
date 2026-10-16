@@ -936,7 +936,8 @@ router.post('/odps/:id/delete', requireAdminSession, restrictToAdmin, (req, res)
 // --- TECHNICIAN MANAGEMENT ---
 router.get('/technicians', requireAdminSession, requireSidebarMenuAccess('technicians'), restrictToAdmin, (req, res) => {
   const technicians = adminSvc.getAllTechnicians();
-  res.render('admin/technicians', { title: 'Manajemen Teknisi', company: company(), activePage: 'technicians', technicians, msg: flashMsg(req) });
+  const masterAreas = areaSvc.getAllAreas();
+  res.render('admin/technicians', { title: 'Manajemen Teknisi', company: company(), activePage: 'technicians', technicians, masterAreas, msg: flashMsg(req) });
 });
 
 router.post('/technicians', requireAdminSession, restrictToAdmin, express.urlencoded({ extended: true }), (req, res) => {
