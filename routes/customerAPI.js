@@ -19,6 +19,7 @@ const agentSvc = require('../services/agentService');
 const techSvc = require('../services/techService');
 const mikrotikService = require('../services/mikrotikService');
 const qrisUtil = require('../utils/qrisUtil');
+const uniqueCodeService = require('../services/uniqueCodeService');
 const QRCode = require('qrcode');
 
 // Helper Token JWT / HMAC
@@ -3177,33 +3178,12 @@ router.post('/app/customer/topup/create', requireCustomerApiAuth, async (req, re
 
     const customer = req.customer;
 
-    // Generate unique code (1-999) without collision
-    let uniqueCode = 0;
-    let totalAmount = 0;
-    if (customerId > 0) {
-      const prefCode = (customerId % 499 === 0) ? 499 : (customerId % 499);
-      const prefAmt = amount + prefCode;
-      const chk = db.prepare('SELECT id FROM customer_topup_requests WHERE status=? AND qris_amount_unique=? LIMIT 1').get('pending', prefAmt);
-      if (!chk) {
-        uniqueCode = prefCode;
-        totalAmount = prefAmt;
-      }
-    }
-    if (!totalAmount) {
-      for (let c = 1; c <= 999; c++) {
-        const testAmt = amount + c;
-        const chk = db.prepare('SELECT id FROM customer_topup_requests WHERE status=? AND qris_amount_unique=? LIMIT 1').get('pending', testAmt);
-        if (!chk) {
-          uniqueCode = c;
-          totalAmount = testAmt;
-          break;
-        }
-      }
-    }
-    if (!totalAmount) {
-      uniqueCode = Math.floor(1 + Math.random() * 998);
-      totalAmount = amount + uniqueCode;
-    }
+    // Generate unique code without collision across all tables
+    const prefCode = (customerId > 0) ? ((customerId % 499 === 0) ? 499 : (customerId % 499)) : null;
+    const { uniqueCode, amountUnique: totalAmount } = uniqueCodeService.allocateUniqueCode(amount, {
+      preferredCode: prefCode,
+      randomize: false
+    });
 
     const ins = db.prepare(`
       INSERT INTO customer_topup_requests (
@@ -4785,69 +4765,11 @@ router.get('/invoices', requireCustomerApiAuth, (req, res) => {
 });
 
 function ensureCustomerApiInvoiceQrisUnique(inv) {
-  const invId = Number(inv?.id || 0);
-  const custId = Number(inv?.customer_id || 0);
-  const baseAmount = Number(inv?.amount || 0);
-  if (!invId || baseAmount <= 0) {
-    return { uniqueCode: 0, amountUnique: baseAmount };
+  try {
+    return uniqueCodeService.ensureInvoiceQrisUnique(inv, false);
+  } catch (_) {
+    return { uniqueCode: Number(inv?.qris_unique_code || 0), amountUnique: Number(inv?.qris_amount_unique || inv?.amount || 0) };
   }
-
-  const currentAmount = Number(inv?.qris_amount_unique || 0);
-  const currentCode = Number(inv?.qris_unique_code || 0);
-  if (currentAmount > 0 && currentCode > 0 && (currentAmount - currentCode === baseAmount)) {
-    return { uniqueCode: currentCode, amountUnique: currentAmount };
-  }
-
-  const exists = db.prepare('SELECT id FROM invoices WHERE status=? AND qris_amount_unique=? AND id!=? LIMIT 1');
-  let chosenCode = 0;
-  let chosenAmount = 0;
-
-  // 1. Prioritaskan ID Pelanggan sebagai kode unik utama (1 s/d 499)
-  if (custId > 0) {
-    const prefCode = (custId % 499 === 0) ? 499 : (custId % 499);
-    const prefAmount = baseAmount + prefCode;
-    if (!exists.get('unpaid', prefAmount, invId)) {
-      chosenCode = prefCode;
-      chosenAmount = prefAmount;
-    }
-  }
-
-  // 2. Jika kode ID Pelanggan sudah terpakai, cari kode 1 s/d 499
-  if (!chosenAmount) {
-    for (let code = 1; code <= 499; code++) {
-      const amount = baseAmount + code;
-      if (!exists.get('unpaid', amount, invId)) {
-        chosenCode = code;
-        chosenAmount = amount;
-        break;
-      }
-    }
-  }
-
-  // 3. Fallback 500 s/d 999
-  if (!chosenAmount) {
-    for (let code = 500; code <= 999; code++) {
-      const amount = baseAmount + code;
-      if (!exists.get('unpaid', amount, invId)) {
-        chosenCode = code;
-        chosenAmount = amount;
-        break;
-      }
-    }
-  }
-
-  if (chosenAmount > 0 && String(inv?.status) === 'unpaid') {
-    try {
-      db.prepare(`
-        UPDATE invoices
-        SET qris_unique_code=?, qris_amount_unique=?, qris_assigned_at=(NOW_LOCAL())
-        WHERE id=?
-      `).run(chosenCode, chosenAmount, invId);
-    } catch (_) {}
-    return { uniqueCode: chosenCode, amountUnique: chosenAmount };
-  }
-
-  return { uniqueCode: chosenCode || 0, amountUnique: chosenAmount || baseAmount };
 }
 
 // Middleware: Customer Auth or Public Invoice Token
