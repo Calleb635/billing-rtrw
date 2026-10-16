@@ -755,6 +755,18 @@ router.get('/app/collector/dashboard', requireCollectorApiAuth, (req, res) => {
     const curMonth = now.getMonth() + 1;
     const curYear = now.getFullYear();
 
+    const isFullAdmin = req.collector?.role === 'admin' || req.collector?.role === 'root';
+    const collectorId = Number(req.collector?.collectorId || req.collector?.id || 0);
+    const collector = collectorId ? db.prepare('SELECT id, name, area, auto_approve FROM collectors WHERE id = ?').get(collectorId) : null;
+
+    let collectorWhere = '1=1';
+    let collectorParams = [];
+    if (!isFullAdmin && collector) {
+      const colFilter = customerSvc.getCollectorCustomerWhere(collector, 'c');
+      collectorWhere = colFilter.where;
+      collectorParams = colFilter.params;
+    }
+
     let q = `
       SELECT c.id, c.name, c.phone, c.address, c.status, c.area, c.isolate_day, c.pppoe_username,
              p.name as package_name, p.price as package_price,
@@ -763,9 +775,9 @@ router.get('/app/collector/dashboard', requireCollectorApiAuth, (req, res) => {
       FROM customers c
       LEFT JOIN packages p ON p.id = c.package_id
       LEFT JOIN invoices i ON i.customer_id = c.id AND i.period_month = ? AND i.period_year = ?
-      WHERE 1=1
+      WHERE ${collectorWhere}
     `;
-    const params = [curMonth, curYear];
+    const params = [curMonth, curYear, ...collectorParams];
 
     if (filterStatus === 'unpaid') {
       q += ` AND (i.status = 'unpaid' OR i.status IS NULL)`;
@@ -794,11 +806,13 @@ router.get('/app/collector/dashboard', requireCollectorApiAuth, (req, res) => {
       FROM customers c
       LEFT JOIN packages p ON p.id = c.package_id
       LEFT JOIN invoices i ON i.customer_id = c.id AND i.period_month = ? AND i.period_year = ?
-    `).get(todayDay, curMonth, curYear) || {};
+      WHERE ${collectorWhere}
+    `).get(todayDay, curMonth, curYear, ...collectorParams) || {};
 
     res.json({
       success: true,
       data: {
+        collectorArea: collector?.area || '',
         customers: list,
         summary: {
           unpaidCount: Number(stats.unpaid_count || 0),
@@ -833,8 +847,18 @@ router.post('/app/collector/pay-bill', requireCollectorApiAuth, async (req, res)
     const inv = billingSvc.getInvoiceById(invId);
     if (!inv) return res.status(404).json({ success: false, message: 'Tagihan tidak ditemukan' });
 
+    const isFullAdmin = req.collector?.role === 'admin' || req.collector?.role === 'root';
     const collectorId = Number(req.collector?.collectorId || req.collector?.id || 0);
-    const collector = collectorId ? db.prepare('SELECT id, name, auto_approve FROM collectors WHERE id = ?').get(collectorId) : null;
+    const collector = collectorId ? db.prepare('SELECT id, name, area, auto_approve FROM collectors WHERE id = ?').get(collectorId) : null;
+
+    if (!isFullAdmin && collector) {
+      const cust = db.prepare('SELECT id, name, area, collector_id FROM customers WHERE id = ?').get(inv.customer_id);
+      if (!cust) return res.status(404).json({ success: false, message: 'Pelanggan tidak ditemukan' });
+      if (!customerSvc.canCollectorAccessCustomer(collector, cust)) {
+        return res.status(403).json({ success: false, message: 'Akses ditolak: Pelanggan tidak berada di wilayah tugas Anda' });
+      }
+    }
+
     const collectorName = collector?.name || req.collector?.name || 'Kolektor Lapangan';
     const isAutoApprove = collector && collector.auto_approve === 1;
 
@@ -1226,6 +1250,18 @@ router.get('/app/collector/customers/map', requireCollectorApiAuth, (req, res) =
     const curMonth = now.getMonth() + 1;
     const curYear = now.getFullYear();
 
+    const isFullAdmin = req.collector?.role === 'admin' || req.collector?.role === 'root';
+    const collectorId = Number(req.collector?.collectorId || req.collector?.id || 0);
+    const collector = collectorId ? db.prepare('SELECT id, name, area FROM collectors WHERE id = ?').get(collectorId) : null;
+
+    let collectorWhere = '1=1';
+    let collectorParams = [];
+    if (!isFullAdmin && collector) {
+      const colFilter = customerSvc.getCollectorCustomerWhere(collector, 'c');
+      collectorWhere = colFilter.where;
+      collectorParams = colFilter.params;
+    }
+
     const customers = db.prepare(`
       SELECT c.id, c.name, c.phone, c.address, c.area, c.lat, c.lng, c.status, c.isolate_day,
              p.name as package_name, p.price as package_price,
@@ -1234,8 +1270,9 @@ router.get('/app/collector/customers/map', requireCollectorApiAuth, (req, res) =
       LEFT JOIN packages p ON p.id = c.package_id
       LEFT JOIN invoices i ON i.customer_id = c.id AND i.period_month = ? AND i.period_year = ?
       WHERE (i.status = 'unpaid' OR i.status IS NULL OR c.status = 'suspended' OR c.status = 'isolated')
+        AND ${collectorWhere}
       ORDER BY c.name ASC LIMIT 100
-    `).all(curMonth, curYear) || [];
+    `).all(curMonth, curYear, ...collectorParams) || [];
 
     res.json({
       success: true,
