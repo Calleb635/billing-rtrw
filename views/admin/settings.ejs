@@ -122,6 +122,43 @@
                 <button type="button" class="btn btn-g" onclick="syncTelegram()" title="<%= t('admin.settings.telegram.sync_title', 'Sinkronkan / Hapus Webhook Lama') %>"><i class="bi bi-arrow-repeat"></i> <%= t('admin.settings.telegram.sync', 'Sinkronkan') %></button>
               </div>
             </div>
+
+            <!-- Sub-section: Asisten AI & Grup Telegram Komunitas -->
+            <div style="margin-top:16px; padding-top:14px; border-top:1px dashed var(--border, #e2e8f0)">
+              <h6 style="font-size:13px; font-weight:600; color:var(--primary, #0ea5e9); margin-bottom:12px">
+                <i class="bi bi-robot"></i> Asisten AI & Grup Telegram Komunitas
+              </h6>
+
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">Asisten AI di Grup</label>
+                  <select class="fs" name="telegram_group_ai_enabled">
+                    <option value="true" <%= settings.telegram_group_ai_enabled !== false ? 'selected' : '' %>>Aktif</option>
+                    <option value="false" <%= settings.telegram_group_ai_enabled === false ? 'selected' : '' %>>Nonaktif</option>
+                  </select>
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Menjawab pertanyaan seputar fitur aplikasi saat di-tag @bot atau via /tanya</div>
+                </div>
+                <div class="fg">
+                  <label class="fl">Google Gemini API Key (Gratis)</label>
+                  <input class="fc" name="gemini_api_key" value="<%= settings.gemini_api_key || '' %>" placeholder="AIzaSy... (dapatkan dari aistudio.google.com)">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Kosongkan jika ingin menggunakan mode knowledge base lokal</div>
+                </div>
+              </div>
+
+              <div class="form-row" style="margin-top:10px">
+                <div class="fg">
+                  <label class="fl">Sambut Member Baru di Grup</label>
+                  <select class="fs" name="telegram_welcome_enabled">
+                    <option value="true" <%= settings.telegram_welcome_enabled !== false ? 'selected' : '' %>>Aktif</option>
+                    <option value="false" <%= settings.telegram_welcome_enabled === false ? 'selected' : '' %>>Nonaktif</option>
+                  </select>
+                </div>
+                <div class="fg">
+                  <label class="fl">Pesan Sambutan Kustom (Opsional)</label>
+                  <input class="fc" name="telegram_welcome_msg" value="<%= settings.telegram_welcome_msg || '' %>" placeholder="Gunakan {nama} dan {bot}">
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -408,6 +445,14 @@
             <label class="fl">Jeda Antar Pesan Broadcast (Detik)</label>
             <input class="fc" type="number" name="whatsapp_broadcast_delay" value="<%= settings.whatsapp_broadcast_delay || 2 %>" min="1" max="60">
             <div style="font-size:10px; color:var(--muted); margin-top:4px">Rekomendasi: Minimal 2 detik agar tidak terdeteksi spam oleh WhatsApp.</div>
+          </div>
+          <div class="fg">
+            <label class="fl">Asisten AI WhatsApp (CS Otomatis)</label>
+            <select class="fs" name="whatsapp_ai_enabled">
+              <option value="true" <%= settings.whatsapp_ai_enabled !== false ? 'selected' : '' %>>Aktif</option>
+              <option value="false" <%= settings.whatsapp_ai_enabled === false ? 'selected' : '' %>>Nonaktif</option>
+            </select>
+            <div style="font-size:10px; color:var(--muted); margin-top:4px">Menjawab otomatis pertanyaan seputar paket, tagihan, dan panduan fitur menggunakan Google Gemini AI.</div>
           </div>
         </div>
 
