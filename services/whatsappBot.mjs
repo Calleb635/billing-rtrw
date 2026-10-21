@@ -698,8 +698,13 @@ function parseCommand(text, isAdmin) {
 
   if (['menu', 'bantuan', 'help'].includes(cmd)) return { cmd: 'menu', rest: '' };
 
-  if (['tanya', 'ai', 'ask', 'konsultasi'].includes(cmd)) {
-    return { cmd: 'ai_ask', rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
+  // Deteksi ping / salam pembuka: 'p', 'p.', 'assalamualaikum', 'halo', 'hai', 'selamat pagi/siang/sore/malam'
+  if (/^p+\.?$/i.test(t) || /^(assalamu['\s]?alaikum|assalamualaikum|aslm|samlikum|shalom|halo|hai|selamat\s+(pagi|siang|sore|malam))/i.test(t)) {
+    return { cmd: 'greeting', raw: t };
+  }
+
+  if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
+    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
   }
 
   if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
@@ -778,6 +783,11 @@ function parseCommand(text, isAdmin) {
   if (cmd === 'gantisandi') return { cmd: 'gantisandi', rest };
   if (cmd === 'daftar') return { cmd: 'daftar', rest };
   if (cmd === 'reboot' || cmd === 'restartonu') return { cmd: 'reboot', rest: '' };
+
+  // Otomatis respon AI jika pesan diakhiri tanda tanya '?' (minimal 6 karakter)
+  if (t.endsWith('?') && t.length >= 6) {
+    return { cmd: 'ai_ask', prefix: 'question', rest: t };
+  }
   return null;
 }
 
@@ -1500,48 +1510,7 @@ export async function processIncomingCommand({
   logger.info(`[WA] Sender details: JID=${(msgKey.remoteJid || phone)}, isAdmin=${isAdmin}, adminSet=${JSON.stringify([...adminSet])}`);
   const parsed = parseCommand(text, isAdmin);
         logger.info(`[WA] Parsed command: ${JSON.stringify(parsed)}`);
-        if (!parsed) {
-          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
-          const remoteJid = msgKey.remoteJid || '';
-          const isGroup = remoteJid.endsWith('@g.us') || remoteJid.includes('status@broadcast');
-
-          if (!isGroup && isAiEnabled && phone) {
-            const { sep, companyHeader } = waBrand();
-            const question = trimmed;
-            const lowerQ = question.toLowerCase();
-
-            // Proteksi Anti-Loop: Abaikan pesan template bot sendiri atau pesan auto-responder WA Business lawan bicara
-            const isBotBroadcast = (sep && question.includes(sep)) || (companyHeader && question.includes(companyHeader));
-            const isAutoReply = /terima kasih telah (menghubungi|chat)|pesan otomatis|auto[-\s]?reply|sedang tidak (aktif|berada di tempat)|di luar jam (operasional|kerja)|silakan tinggalkan pesan|kami akan segera menghubungi/i.test(lowerQ);
-
-            if (isBotBroadcast || isAutoReply) {
-              logger.info(`[WA AI] Mengabaikan pesan siaran / auto-reply dari ${phone} untuk mencegah looping.`);
-              return false;
-            }
-
-            const cooldownCheck = checkCommandCooldown(phone);
-            if (cooldownCheck.allowed) {
-              if (question.length >= 3 && !/^[0-9]+$/.test(question)) {
-                try {
-                  logger.info(`[WA AI] Menjawab pertanyaan dari ${phone}: "${question}"`);
-                  const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
-                  const aiReply = await telegramAi.askAi({
-                    question,
-                    senderName: customerContext?.customerName || senderName || 'Pelanggan',
-                    customerContext
-                  });
-                  if (aiReply) {
-                    await reply(aiReply);
-                    return true;
-                  }
-                } catch (err) {
-                  logger.error('[WA AI] Gagal memproses AI: ' + err.message);
-                }
-              }
-            }
-          }
-          return false;
-        }
+        if (!parsed) return false;
 
         // Rate Limiting Check
         /* phone already defined */
@@ -1568,6 +1537,38 @@ export async function processIncomingCommand({
           }
         }
 
+        if (parsed.cmd === 'greeting') {
+          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
+          if (!isAiEnabled) return false;
+
+          const { companyHeader } = waBrand();
+          const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
+          const greetingName = customerContext?.customerName || senderName || '';
+          const nameStr = greetingName ? ` *${greetingName}*` : '';
+
+          const isP = /^p+\.?$/i.test(parsed.raw);
+          const isSalam = /assalamu/i.test(parsed.raw) || /aslm/i.test(parsed.raw) || /samlikum/i.test(parsed.raw);
+
+          let salamHeader = '';
+          if (isSalam) {
+            salamHeader = `وَعَلَيْكُمُ السَّلاَمُ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ\n\nHalo${nameStr}! 👋 Selamat datang di layanan pelanggan *${companyHeader}*.`;
+          } else if (isP) {
+            salamHeader = `وَعَلَيْكُمُ السَّلاَمُ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ\n\nHalo${nameStr}! 👋 Ada yang bisa kami bantu seputar layanan internet *${companyHeader}*?`;
+          } else {
+            salamHeader = `Halo${nameStr}! 👋 Selamat datang di layanan pelanggan *${companyHeader}*.`;
+          }
+
+          const replyMsg = `${salamHeader}\n\n` +
+            `Ada yang bisa kami bantu seputar layanan internet Anda hari ini?\n\n` +
+            `💡 *Panduan Cepat:*\n` +
+            `• *Tanya Info / Bantuan:* Ketik pertanyaan Anda (akhiri tanda *?* atau awalan *tanya*)\n` +
+            `• *Cek Tagihan:* Ketik \`cektagihan\` atau \`billing\`\n` +
+            `• *Menu Lengkap:* Ketik \`menu\``;
+
+          await reply(replyMsg);
+          return true;
+        }
+
         if (parsed.cmd === 'ai_ask') {
           const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
           if (!isAiEnabled) {
@@ -1576,7 +1577,14 @@ export async function processIncomingCommand({
           }
           const q = parsed.rest;
           if (!q) {
-            await reply('💡 Silakan tulis pertanyaan setelah perintah.\nContoh:\n*tanya bagaimana cara isolir otomatis?*');
+            if (['billing', 'biling'].includes(parsed.prefix)) {
+              const invoices = phone ? billingSvc.getInvoicesByAny(phone) : null;
+              if (invoices && invoices.length > 0) {
+                await reply(formatCustomerInvoices(invoices, phone));
+                return true;
+              }
+            }
+            await reply('💡 Silakan tulis pertanyaan setelah kata kunci *billing* atau *tanya*.\n\nContoh:\n• *billing berapa tagihan saya?*\n• *tanya cara ganti password wifi*\n• Atau ketik *cektagihan*');
             return true;
           }
           try {
