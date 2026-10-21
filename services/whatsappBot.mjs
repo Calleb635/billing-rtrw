@@ -423,7 +423,74 @@ async function resolveCustomerContext(key, lidStore) {
     if (lidJid) lidStore.set(lidJid, tagToCache);
   }
 
-  return { billingKey: billingKey || deviceKey, deviceKey };
+  return { billingKey: billingKey || deviceKey, deviceKey, customer };
+}
+
+async function getCustomerBillingSummary(msgKey, currentLidStore, phone) {
+  try {
+    let customer = null;
+    let billingKey = null;
+
+    if (msgKey) {
+      const ctx = await resolveCustomerContext(msgKey, currentLidStore);
+      if (ctx) {
+        billingKey = ctx.billingKey;
+        customer = ctx.customer;
+      }
+    }
+
+    if (!customer && phone) {
+      customer = customerSvc.findCustomerByAny(phone);
+      if (customer && !billingKey) billingKey = customer.phone || customer.pppoe_username || customer.name;
+    }
+
+    if (!billingKey && phone) {
+      billingKey = phone;
+    }
+
+    if (!billingKey) return null;
+
+    if (!customer) {
+      customer = customerSvc.findCustomerByAny(billingKey);
+    }
+
+    const invoices = billingSvc.getInvoicesByAny(billingKey);
+    if (!customer && (!invoices || invoices.length === 0)) {
+      return null;
+    }
+
+    const custName = customer ? customer.name : 'Pelanggan';
+    const packageName = customer ? (customer.package_name || customer.profile) : '-';
+    const pppoe = customer ? customer.pppoe_username : '-';
+    const status = customer ? customer.status : 'Active';
+    
+    const unpaid = (invoices || []).filter(i => i.status !== 'paid');
+    const totalUnpaid = unpaid.reduce((sum, i) => sum + Number(i.amount || 0), 0);
+    
+    let invDetails = '';
+    if (unpaid.length > 0) {
+      invDetails = unpaid.map(i => {
+        const periodStr = formatIndonesianPeriod(i.period_month, i.period_year);
+        return `• Periode ${periodStr}: Rp ${Number(i.amount || 0).toLocaleString('id-ID')} (Invoice #${i.id}, Jatuh Tempo: ${i.due_date || '-'})`;
+      }).join('\n');
+    }
+
+    return {
+      customerName: custName,
+      pppoeUsername: pppoe,
+      package: packageName,
+      customerStatus: status,
+      hasUnpaid: unpaid.length > 0,
+      unpaidCount: unpaid.length,
+      totalUnpaidAmount: totalUnpaid,
+      unpaidInvoices: invDetails,
+      allPaid: unpaid.length === 0 && (invoices || []).length > 0,
+      noInvoices: !invoices || invoices.length === 0
+    };
+  } catch (err) {
+    logger.warn('[WA AI] getCustomerBillingSummary error: ' + err.message);
+    return null;
+  }
 }
 
 function formatInfo(data) {
@@ -1457,9 +1524,11 @@ export async function processIncomingCommand({
               if (question.length >= 3 && !/^[0-9]+$/.test(question)) {
                 try {
                   logger.info(`[WA AI] Menjawab pertanyaan dari ${phone}: "${question}"`);
+                  const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
                   const aiReply = await telegramAi.askAi({
                     question,
-                    senderName: senderName || 'Pelanggan'
+                    senderName: customerContext?.customerName || senderName || 'Pelanggan',
+                    customerContext
                   });
                   if (aiReply) {
                     await reply(aiReply);
@@ -1511,9 +1580,11 @@ export async function processIncomingCommand({
             return true;
           }
           try {
+            const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
             const aiReply = await telegramAi.askAi({
               question: q,
-              senderName: senderName || 'Pelanggan'
+              senderName: customerContext?.customerName || senderName || 'Pelanggan',
+              customerContext
             });
             await reply(aiReply);
           } catch (err) {

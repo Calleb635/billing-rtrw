@@ -54,7 +54,7 @@ Fitur Utama:
 /**
  * Panggil Google Gemini API
  */
-async function callGeminiApi(apiKey, userQuestion, senderName = 'Member') {
+async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', customerContext = null) {
   const knowledge = loadKnowledgeBase();
   const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.7-flash', 'gemini-3.8-flash'];
   const preferredModel = getSetting('gemini_model', 'gemini-3.5-flash-lite');
@@ -62,14 +62,35 @@ async function callGeminiApi(apiKey, userQuestion, senderName = 'Member') {
   // Prioritaskan model pilihan user
   const modelList = [preferredModel, ...models.filter(m => m !== preferredModel)];
 
-  const systemInstruction = `Anda adalah "Asisten AI Komunitas RTRW-Net", asisten cerdas yang ramah dan membantu untuk grup diskusi pengguna "RTRWNET Management & Billing System" (Botlokal).
+  let liveCustomerDataPrompt = '';
+  if (customerContext) {
+    liveCustomerDataPrompt = `
+----------------------------------------
+DATA STATUS LIVE PELANGGAN (Dari Database Server Billing):
+- Nama Pelanggan: ${customerContext.customerName || senderName}
+- Paket Layanan: ${customerContext.package || '-'}
+- Akun PPPoE: ${customerContext.pppoeUsername || '-'}
+- Status Langganan: ${customerContext.customerStatus || 'Active'}
+- Status Tagihan Saat Ini: ${customerContext.hasUnpaid ? `MEMILIKI ${customerContext.unpaidCount} TAGIHAN BELUM LUNAS (Total: Rp ${customerContext.totalUnpaidAmount.toLocaleString('id-ID')})` : (customerContext.allPaid ? 'SEMUA TAGIHAN SUDAH LUNAS' : 'Belum ada data tagihan')}
+${customerContext.unpaidInvoices ? `Rincian Tagihan Belum Lunas:\n${customerContext.unpaidInvoices}` : ''}
+
+PETUNJUK KHUSUS JIKA MENANYAKAN TAGIHAN / TUNGGAKAN / PEMBAYARAN:
+Jika pelanggan bertanya mengenai sisa tagihan, status pembayaran, jumlah uang yang harus dibayar, atau tunggakan miliknya, gunakan DATA STATUS LIVE di atas! Sebutkan nama pelanggan, total tagihan yang belum lunas beserta rincian periode bulannya secara sopan, jelas, dan ramah. Jika semua tagihan sudah lunas, beritahukan bahwa tagihan sudah lunas dan ucapkan terima kasih.
+----------------------------------------
+`;
+  }
+
+  const systemInstruction = `Anda adalah "Asisten AI Komunitas & Layanan Pelanggan RTRW-Net", asisten cerdas yang ramah dan membantu untuk grup diskusi dan layanan pelanggan WhatsApp "RTRWNET Management & Billing System" (Botlokal).
 
 Pedoman Jawaban:
-1. TERKAIT APLIKASI: Jika pertanyaan berkaitan dengan aplikasi RTRWNET / Botlokal (seperti Billing, MikroTik, GenieACS TR-069, OLT SNMP, Payment Gateway, WhatsApp Baileys, Portal Pelanggan, Voucher, isolir, dll.), jawablah secara mendalam, akurat, dan mengacu pada DOKUMENTASI SISTEM di bawah ini.
-2. PERTANYAAN UMUM / DI LUAR APLIKASI: Jika pertanyaan mengenai hal umum di luar aplikasi (misalnya konsep jaringan komputer, MikroTik dasar, Linux/server, tips teknologi, coding, atau obrolan santai), Anda TETAP BISA menjawab dengan ramah, cerdas, solutif, dan informatif.
-3. Gaya Bahasa: Gunakan Bahasa Indonesia yang santun, bersahabat, jelas, dan profesional.
-4. Format: Gunakan format Markdown Telegram yang rapi (bullet points, bold untuk penekanan istilah, backtick untuk perintah/kode).
-5. Panjang Jawaban: Buat jawaban yang padat dan to-the-point (maksimal 3-4 paragraf atau 5-8 poin agar nyaman dibaca di layar chat).
+1. TERKAIT APLIKASI & LAYANAN: Jika pertanyaan berkaitan dengan aplikasi RTRWNET / Botlokal (seperti Billing, MikroTik, GenieACS TR-069, OLT SNMP, Payment Gateway, WhatsApp Baileys, Portal Pelanggan, Voucher, isolir, dll.), jawablah secara mendalam, akurat, dan mengacu pada DOKUMENTASI SISTEM di bawah ini.
+2. PERTANYAAN DATA TAGIHAN / STATUS PRIBADI PELANGGAN: Jika ada DATA STATUS LIVE PELANGGAN di bawah, gunakan informasi riil tersebut untuk menjawab pertanyaan pribadi pelanggan tersebut secara presisi.
+3. PERTANYAAN UMUM / DI LUAR APLIKASI: Jika pertanyaan mengenai hal umum di luar aplikasi (misalnya konsep jaringan komputer, MikroTik dasar, Linux/server, tips teknologi, coding, atau obrolan santai), Anda TETAP BISA menjawab dengan ramah, cerdas, solutif, dan informatif.
+4. Gaya Bahasa: Gunakan Bahasa Indonesia yang santun, bersahabat, jelas, dan profesional.
+5. Format: Gunakan format teks rapi (bullet points, bold untuk penekanan istilah).
+6. Panjang Jawaban: Buat jawaban yang padat dan to-the-point (maksimal 3-4 paragraf atau 5-8 poin agar nyaman dibaca di layar chat).
+
+${liveCustomerDataPrompt}
 
 DOKUMENTASI SISTEM (Khusus untuk pertanyaan seputar fitur aplikasi):
 ${knowledge}
@@ -134,8 +155,22 @@ ${knowledge}
 /**
  * Fallback Jawaban Cerdas berbasis Kata Kunci jika belum ada Gemini API Key
  */
-function getOfflineAnswer(question) {
+function getOfflineAnswer(question, customerContext = null) {
   const q = String(question || '').toLowerCase();
+
+  // Jika pelanggan menanyakan tagihan/tunggakan dan ada data live pelanggan
+  if (customerContext && (q.includes('tagihan') || q.includes('tunggak') || q.includes('bayar') || q.includes('lunas') || q.includes('tempo') || q.includes('invoice'))) {
+    if (customerContext.hasUnpaid) {
+      return `Halo Kak *${customerContext.customerName}*,\n\n` +
+        `Saat ini Anda memiliki *${customerContext.unpaidCount} tagihan belum lunas* dengan total:\n` +
+        `💰 *Rp ${customerContext.totalUnpaidAmount.toLocaleString('id-ID')}*\n\n` +
+        `📋 *Rincian Tagihan:*\n${customerContext.unpaidInvoices}\n\n` +
+        `💡 _Pembayaran dapat dilakukan melalui transfer bank atau QRIS di portal pelanggan atau hubungi admin/kolektor._`;
+    } else if (customerContext.allPaid) {
+      return `Halo Kak *${customerContext.customerName}*,\n\n` +
+        `✅ *Semua tagihan internet Anda sudah LUNAS!* Tidak ada tunggakan saat ini.\nTerima kasih atas kerja samanya. 🙏`;
+    }
+  }
 
   if (q.includes('isolir') || q.includes('putus') || q.includes('tunggak')) {
     return `🔒 *Fitur Auto Isolir & Unisolir*\n\n` +
@@ -217,27 +252,27 @@ function getOfflineAnswer(question) {
 /**
  * Handle tanya jawab AI utama
  */
-async function askAi({ question, senderName }) {
+async function askAi({ question, senderName, customerContext = null }) {
   const cleanQ = String(question || '').trim();
   if (!cleanQ) {
-    return 'Silakan ajukan pertanyaan seputar fitur aplikasi. Contoh: `/tanya bagaimana cara isolir otomatis?`';
+    return 'Silakan ajukan pertanyaan seputar fitur aplikasi atau layanan internet Anda.';
   }
 
   const apiKey = getSetting('gemini_api_key', '');
   
   if (apiKey && apiKey.trim()) {
     try {
-      const aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName);
+      const aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName, customerContext);
       return aiReply;
     } catch (err) {
       logger.error(`[TelegramAI] Gagal call Gemini API: ${err.message}. Menggunakan fallback jawaban lokal.`);
       // Jika AI error, fallback ke jawaban offline
-      return getOfflineAnswer(cleanQ);
+      return getOfflineAnswer(cleanQ, customerContext);
     }
   }
 
   // Jika API key belum diatur, gunakan offline knowledge base
-  return getOfflineAnswer(cleanQ);
+  return getOfflineAnswer(cleanQ, customerContext);
 }
 
 /**
