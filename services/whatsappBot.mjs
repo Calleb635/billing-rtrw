@@ -18,6 +18,7 @@ const mikrotikSvc = require('./mikrotikService.js');
 const customerSvc = require('./customerService.js');
 const agentSvc = require('./agentService.js');
 const { formatIndonesianPeriod, formatUnpaidInvoicesSummary } = require('./whatsappService.js');
+const telegramAi = require('./telegramAiService.js');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -630,6 +631,10 @@ function parseCommand(text, isAdmin) {
 
   if (['menu', 'bantuan', 'help'].includes(cmd)) return { cmd: 'menu', rest: '' };
 
+  if (['tanya', 'ai', 'ask', 'konsultasi'].includes(cmd)) {
+    return { cmd: 'ai_ask', rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
+  }
+
   if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
     return { cmd: 'agent_saldo' };
   }
@@ -912,6 +917,7 @@ ${sep}
 🔑 \`gantisandi\` _sandi_ — Ubah password
 🔄 \`reboot\` — Restart ONU
 🔗 \`daftar\` _tag/nomor_ — Bind nomor WA
+🤖 \`tanya\` _pertanyaan_ — Tanya Asisten AI
 
 ${sep}
 ${footerInfo ? footerInfo : '💡 *Contoh:* `cektagihan`'}`;
@@ -1427,7 +1433,46 @@ export async function processIncomingCommand({
   logger.info(`[WA] Sender details: JID=${(msgKey.remoteJid || phone)}, isAdmin=${isAdmin}, adminSet=${JSON.stringify([...adminSet])}`);
   const parsed = parseCommand(text, isAdmin);
         logger.info(`[WA] Parsed command: ${JSON.stringify(parsed)}`);
-        if (!parsed) return false;
+        if (!parsed) {
+          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
+          const remoteJid = msgKey.remoteJid || '';
+          const isGroup = remoteJid.endsWith('@g.us') || remoteJid.includes('status@broadcast');
+
+          if (!isGroup && isAiEnabled && phone) {
+            const { sep, companyHeader } = waBrand();
+            const question = trimmed;
+            const lowerQ = question.toLowerCase();
+
+            // Proteksi Anti-Loop: Abaikan pesan template bot sendiri atau pesan auto-responder WA Business lawan bicara
+            const isBotBroadcast = (sep && question.includes(sep)) || (companyHeader && question.includes(companyHeader));
+            const isAutoReply = /terima kasih telah (menghubungi|chat)|pesan otomatis|auto[-\s]?reply|sedang tidak (aktif|berada di tempat)|di luar jam (operasional|kerja)|silakan tinggalkan pesan|kami akan segera menghubungi/i.test(lowerQ);
+
+            if (isBotBroadcast || isAutoReply) {
+              logger.info(`[WA AI] Mengabaikan pesan siaran / auto-reply dari ${phone} untuk mencegah looping.`);
+              return false;
+            }
+
+            const cooldownCheck = checkCommandCooldown(phone);
+            if (cooldownCheck.allowed) {
+              if (question.length >= 3 && !/^[0-9]+$/.test(question)) {
+                try {
+                  logger.info(`[WA AI] Menjawab pertanyaan dari ${phone}: "${question}"`);
+                  const aiReply = await telegramAi.askAi({
+                    question,
+                    senderName: senderName || 'Pelanggan'
+                  });
+                  if (aiReply) {
+                    await reply(aiReply);
+                    return true;
+                  }
+                } catch (err) {
+                  logger.error('[WA AI] Gagal memproses AI: ' + err.message);
+                }
+              }
+            }
+          }
+          return false;
+        }
 
         // Rate Limiting Check
         /* phone already defined */
@@ -1452,6 +1497,30 @@ export async function processIncomingCommand({
           if (rateLimitCheck.remaining <= 3) {
             logger.info(`[WhatsApp Bot] Rate limit warning for ${phone}: ${rateLimitCheck.remaining} commands remaining`);
           }
+        }
+
+        if (parsed.cmd === 'ai_ask') {
+          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
+          if (!isAiEnabled) {
+            await reply('ℹ️ Fitur Asisten AI WhatsApp sedang dinonaktifkan di pengaturan.');
+            return true;
+          }
+          const q = parsed.rest;
+          if (!q) {
+            await reply('💡 Silakan tulis pertanyaan setelah perintah.\nContoh:\n*tanya bagaimana cara isolir otomatis?*');
+            return true;
+          }
+          try {
+            const aiReply = await telegramAi.askAi({
+              question: q,
+              senderName: senderName || 'Pelanggan'
+            });
+            await reply(aiReply);
+          } catch (err) {
+            logger.error('[WA AI] Error: ' + err.message);
+            await reply('❌ Maaf, sedang terjadi kendala memproses jawaban AI.');
+          }
+          return true;
         }
 
         if (parsed.cmd === 'menu') {

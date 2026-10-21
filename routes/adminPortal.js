@@ -4225,6 +4225,9 @@ router.post('/settings', requireAdminSession, express.urlencoded({ extended: tru
     
     newSettings.login_otp_enabled = (newSettings.login_otp_enabled === 'true');
     newSettings.telegram_enabled = (newSettings.telegram_enabled === 'true');
+    newSettings.telegram_group_ai_enabled = (newSettings.telegram_group_ai_enabled === 'true');
+    newSettings.telegram_welcome_enabled = (newSettings.telegram_welcome_enabled === 'true');
+    newSettings.whatsapp_ai_enabled = (newSettings.whatsapp_ai_enabled === 'true');
     newSettings.auto_backup_enabled = (newSettings.auto_backup_enabled === 'true');
     newSettings.use_builtin_acs = (newSettings.use_builtin_acs === 'true' || newSettings.use_builtin_acs === true);
 

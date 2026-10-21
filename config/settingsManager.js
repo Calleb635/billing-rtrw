@@ -293,7 +293,12 @@ function ensureDefaultSettings() {
       radius_ip_pool_start: '10.10.10.2',
       radius_ip_pool_end: '10.10.10.254',
       radius_framed_pool: 'pool-pppoe',
-      radius_send_group: '0'
+      radius_send_group: '0',
+      telegram_group_ai_enabled: true,
+      telegram_welcome_enabled: true,
+      gemini_api_key: '',
+      telegram_welcome_msg: '',
+      whatsapp_ai_enabled: true
     };
     
     // Cek dan tambahkan setting yang belum ada
