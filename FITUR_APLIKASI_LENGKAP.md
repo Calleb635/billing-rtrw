@@ -2267,3 +2267,276 @@ Untuk detail lebih lanjut per fitur, lihat file-file:
 - AUDIT_LENGKAP.md (technical deep dive)
 - DATABASE_SCHEMA.md (data structure)
 - QUICK_REFERENCE.md (quick commands)
+
+
+---
+
+## 🛠️ PANDUAN PEMECAHAN MASALAH & SOLUSI KENDALA SISTEM (TROUBLESHOOTING GUIDE)
+
+Bagian ini menyajikan panduan diagnosis teknis lengkap untuk menyelesaikan setiap kendala operasional yang mungkin dihadapi oleh Administrator, Teknisi Lapangan, maupun Pelanggan RTRW-Net.
+
+---
+
+### 1. KENDALA BILLING, ISOLIR, & INVOICING
+
+#### A. Pelanggan Sudah Terisolir (Status Suspended) tapi Masih Bisa Browsing / Internetan
+* **Penyebab Utama:**
+  1. **Sesi PPPoE Aktif Belum Di-Kick:** Ketika status billing diubah ke isolir, koneksi PPPoE aktif di MikroTik masih memegang IP lama sebelum rule isolir diterapkan.
+  2. **Posisi NAT Rule Isolir Salah:** Rule DST-NAT isolir berada di bawah rule masquerade umum atau rule bypass lainnya.
+  3. **DNS Bypass:** Pelanggan menggunakan DNS manual (misal Google DNS 8.8.8.8, Cloudflare 1.1.1.1, atau DoH pada browser) dan port 53 UDP/TCP belum di-redirect / di-drop oleh MikroTik.
+  4. **Flag Auto-Isolir Nonaktif:** Field `auto_isolate` bernilai `0` pada data pelanggan di database.
+* **Langkah Solusi Konkret:**
+  1. Putus (kick) sesi aktif pelanggan via Bot WhatsApp/Telegram: ketik `kickuser <username_pppoe>` atau via Winbox: `/interface pppoe-server remove [find user="<username>"]`.
+  2. Pindahkan NAT rule isolir ke baris paling atas di Winbox:
+     ```routeros
+     /ip firewall nat add chain=dstnat protocol=tcp dst-port=80,443 src-address-list=ISOLIR action=redirect to-ports=80 place-before=0
+     /ip firewall nat add chain=dstnat protocol=udp dst-port=53 src-address-list=ISOLIR action=redirect to-ports=53 place-before=0
+     ```
+  3. Pastikan landing page isolir aktif di web billing: `http://<IP_SERVER>:3001/isolated`.
+  4. Pastikan di database billing pelanggan memiliki status `auto_isolate = 1`.
+
+#### B. Pelanggan Sudah Bayar / Lunas tapi Internet Masih Terisolir
+* **Penyebab Utama:**
+  1. IP pelanggan masih tersangkut di `/ip firewall address-list` dengan nama list `ISOLIR`.
+  2. Profile PPPoE di `/ppp secret` belum dikembalikan dari profile isolir ke profile paket semula.
+  3. Pelanggan belum melakukan restart modem / dial-up ulang.
+* **Langkah Solusi Konkret:**
+  1. **Via Web Billing:** Buka data pelanggan -> Klik tombol "Buka Isolir". Sistem akan memanggil `activateCustomer(id)` yang secara otomatis mengembalikan profile PPPoE ke paket aslinya dan men-kick sesi aktif agar router memberikan IP normal.
+  2. **Via Bot WhatsApp / Telegram:** Ketik perintah `buka <nama/id_pelanggan>`.
+  3. **Via Winbox Manual (Darurat):**
+     ```routeros
+     /ip firewall address-list remove [find address="<IP_PELANGGAN>"]
+     /ppp secret set [find name="<USER_PPPOE>"] profile="<NAMA_PAKET>"
+     /interface pppoe-server remove [find user="<USER_PPPOE>"]
+     ```
+
+#### C. Invoice Tagihan Bulanan Tidak Terbit Otomatis di Awal Bulan
+* **Penyebab Utama:**
+  1. Service PM2 `billing` sempat mati atau server restart saat jam eksekusi cron job (biasanya jam 00:05 tanggal 1).
+  2. Pelanggan baru belum memiliki data billing date atau berstatus nonaktif saat cron berjalan.
+* **Langkah Solusi Konkret:**
+  1. **Via Web Admin:** Masuk ke menu `Billing & Invoice` -> Klik tombol "Generate Tagihan Periode Ini".
+  2. **Via Bot WhatsApp / Telegram:** Ketik `generate <bulan> <tahun>`, misal: `generate 11 2026`. Sistem akan otomatis menerbitkan invoice baru untuk pelanggan aktif tanpa menggandakan invoice yang sudah ada.
+  3. Periksa status cron di log: `pm2 logs billing --lines 50`.
+
+#### D. Denda Keterlambatan (Late Fee) Tidak Terhitung
+* **Penyebab Utama:** Fitur denda belum diaktifkan di konfigurasi atau jatuh tempo belum lewat.
+* **Langkah Solusi Konkret:**
+  1. Masuk ke Web Admin -> Pengaturan (Settings) -> Tagihan & Pembayaran.
+  2. Aktifkan opsi "Terapkan Denda Telat" (`late_fee_enabled: true`).
+  3. Atur nominal denda (misal Rp 5.000 atau Rp 10.000). Denda akan ditambahkan otomatis ke tagihan saat jatuh tempo terlewati.
+
+---
+
+### 2. KENDALA MIKROTIK & JARINGAN
+
+#### A. Error: "Tidak bisa konek ke MikroTik port 8728/8729/8711" (API Timeout)
+* **Penyebab Utama:**
+  1. Service API MikroTik (`api` / `api-ssl`) dalam keadaan disable di RouterOS.
+  2. Port API diubah dari default atau port tidak cocok dengan yang diisi di web billing.
+  3. Firewall MikroTik memblokir input port API dari IP server billing.
+  4. Routing antara server billing dan MikroTik terputus (tunnel VPN down atau IP gateway berubah).
+* **Langkah Solusi Konkret:**
+  1. Buka terminal MikroTik via Winbox / SSH:
+     ```routeros
+     /ip service enable api
+     /ip service set api port=8728
+     ```
+     Jika menggunakan koneksi SSL:
+     ```routeros
+     /ip service enable api-ssl
+     /ip service set api-ssl port=8729
+     ```
+  2. Tambahkan rule firewall allow API di baris teratas:
+     ```routeros
+     /ip firewall filter add chain=input protocol=tcp dst-port=8728 action=accept place-before=0 comment="Allow Billing API"
+     ```
+  3. Buka Web Admin -> Menu Routers: Pastikan Host (IP), Port, Username, dan Password sama persis dengan yang bisa login di Winbox. Disarankan membuat user khusus di MikroTik:
+     ```routeros
+     /user group add name=billing-api policy=api,read,write,test
+     /user add name=billinguser group=billing-api password="passwordkuat123"
+     ```
+
+#### B. Secret PPPoE Hilang / Tidak Sinkron Antara Web Billing dan MikroTik
+* **Penyebab Utama:** Secret terhapus manual langsung di Winbox, atau terjadi restore backup MikroTik lama.
+* **Langkah Solusi Konkret:**
+  1. Buka Web Admin -> Routers -> Klik "Sync Secrets" atau "Import Secrets".
+  2. Atau buka menu Data Pelanggan, klik "Edit Pelanggan", lalu klik "Simpan" tanpa mengubah data. Sistem akan mem-push ulang secret ke MikroTik secara otomatis.
+
+#### C. Voucher Hotspot Tidak Bisa Login / "User not found" / "Invalid username or password"
+* **Penyebab Utama:**
+  1. Server Hotspot MikroTik menggunakan profile dengan setting Cookie atau MAC Auth yang konflik dengan perangkat baru.
+  2. User hotspot belum ter-push ke router yang aktif (pada mode Multi-Router).
+* **Langkah Solusi Konkret:**
+  1. Cek di Winbox: `/ip hotspot user print where name="<KODE_VOUCHER>"`.
+  2. Jika user belum ada: Buat voucher ulang via Web Admin -> Hotspot Voucher -> Generate, atau via bot: `vcr <paket> <jumlah>`.
+  3. Pastikan profile server hotspot mengizinkan HTTP CHAP dan HTTP PAP.
+
+---
+
+### 3. KENDALA GENIEACS & MODEM ONU (TR-069)
+
+#### A. Modem ONU Pelanggan Tidak Muncul di Daftar GenieACS
+* **Penyebab Utama:**
+  1. Konfigurasi CWMP / TR-069 di web modem pelanggan (192.168.1.1) belum diisi atau dinonaktifkan.
+  2. URL ACS salah atau port 7547 di server billing terblokir firewall UFW.
+  3. Modem tidak memiliki rute jaringan ke IP server GenieACS (misal VLAN TR-069 belum dibinding di OLT/MikroTik).
+* **Langkah Solusi Konkret:**
+  1. Buka web manajemen modem (192.168.1.1):
+     - Masuk ke menu `Network` / `Application` -> `CWMP` / `TR-069`.
+     - Enable CWMP: **Centang (Aktif)**.
+     - ACS URL: `http://<IP_SERVER_BILLING>:7547/`
+     - Periodic Inform: **Enable**, Interval: `300` detik (5 menit).
+     - Username & Password ACS: Sesuaikan dengan konfigurasi GenieACS.
+     - Connection Request Username & Password: Buat standar (misal: `admin`/`admin`).
+  2. Di server Linux: Jalankan perintah `sudo ufw allow 7547/tcp`.
+  3. Pastikan tag pelanggan di Web Billing sama persis dengan Serial Number / OUI modem di GenieACS.
+
+#### B. Redaman Optik (Optical Power RX) Jelek (> -25 dBm) atau Status LOS (Lampu Merah Berkedip)
+* **Kategori Standar Redaman Optik (Wavelength 1490nm):**
+  - **-15 dBm s/d -22 dBm:** SANGAT BAIK / IDEAL (Koneksi stabil, throughput maksimal).
+  - **-23 dBm s/d -25 dBm:** CUKUP / AMBANG BATAS (Masih jalan normal, pantau berkala).
+  - **-26 dBm s/d -28 dBm:** BURUK (Mulai terjadi packet loss, latency tinggi, throughput drop saat jam sibuk).
+  - **> -28 dBm s/d -32 dBm:** KRITIS (Sering putus nyambung / dial PPPoE gagal).
+  - **LOS (Lampu Merah Menyala / RX < -35 dBm):** PUTUS TOTAL (Sinyal optik tidak sampai ke modem).
+* **Langkah Solusi Konkret:**
+  1. Cek redaman live via Bot WA/Telegram: ketik `info <nama_pelanggan>` atau `/redaman <tag>`.
+  2. **Jika Redaman -25 dBm s/d -28 dBm:**
+     - Bersihkan ujung konektor SC/UPC (biru) atau SC/APC (hijau) pada patchcord dengan alkohol isopropil.
+     - Periksa kabel dropcore dari lekukan tajam (macro bending) di dekat roset atau proteksi tiang.
+  3. **Jika LOS (Lampu Merah):**
+     - Kirim teknisi dengan membawa OPM (Optical Power Meter) & VFL (Laser Merah).
+     - Ukur redaman langsung di output ODP. Jika di ODP bagus (-18 dBm) tapi di rumah pelanggan LOS, berarti kabel dropcore putus/terjepit di tiang. Lakukan splicing ulang atau penarikan kabel baru.
+
+#### C. Gagal Ganti SSID atau Kata Sandi WiFi via Web / Bot
+* **Penyebab Utama:** Modem sedang offline (mati lampu / kabel optik tercabut), atau modem lambat merespon antrean task TR-069.
+* **Langkah Solusi Konkret:**
+  1. Pastikan modem online (lampu PON hijau stabil, last inform < 5 menit).
+  2. Kirim perintah reboot terlebih dahulu: via bot ketik `reboot <nama_pelanggan>`.
+  3. Setelah modem booting selesai (sekitar 1-2 menit), ulangi perintah ganti sandi / SSID via bot atau web portal.
+
+---
+
+### 4. KENDALA OLT & PORT PON (SNMP)
+
+#### A. Status OLT Offline di Web Billing
+* **Penyebab Utama:** Community SNMP tidak cocok, port 161 UDP tertutup, atau IP OLT tidak dapat di-ping.
+* **Langkah Solusi Konkret:**
+  1. Di server billing, tes koneksi SNMP:
+     `snmpwalk -v2c -c public <IP_OLT> 1.3.6.1.2.1.1.1`
+  2. Jika timeout: Cek konfigurasi SNMP di OLT (pastikan SNMP Agent aktif, community string sama, dan host server diizinkan).
+  3. Pastikan firewall tidak memblokir port UDP 161.
+
+#### B. Unconfigured ONU Tidak Terdeteksi di Halaman OLT
+* **Penyebab Utama:** OLT memerlukan waktu hingga 60-120 detik untuk scanning port PON setelah ONU baru tercolok.
+* **Langkah Solusi Konkret:** Tunggu 1-2 menit lalu klik tombol "Refresh Discovery". Pastikan jenis OLT (HIOSO, VSOL, ZTE, atau BDCOM) dipilih sesuai tipe hardware di menu Konfigurasi OLT.
+
+---
+
+### 5. KENDALA PAYMENT GATEWAY & WEBHOOK CALLBACK
+
+#### A. Pelanggan Sudah Bayar via QRIS / Transfer tapi Tagihan Tetap "Unpaid"
+* **Penyebab Utama:**
+  1. URL Webhook Callback belum didaftarkan di dashboard merchant payment gateway (Tripay/Midtrans/Xendit/Duitku).
+  2. URL Webhook menggunakan HTTP biasa (bukan HTTPS). Sebagian besar payment gateway menolak callback ke non-HTTPS.
+  3. Merchant Code, API Key, atau Private Key salah sehingga verifikasi hash/signature callback gagal.
+  4. Server billing berada di balik Cloudflare dan IP callback gateway terblokir oleh Challenge/WAF Cloudflare.
+* **Langkah Solusi Konkret:**
+  1. Masuk ke dashboard merchant payment gateway Anda, daftarkan URL Callback resmi:
+     - **Tripay:** `https://domain-anda.com/api/payment/tripay/callback`
+     - **Midtrans:** `https://domain-anda.com/api/payment/midtrans/callback`
+     - **Xendit:** `https://domain-anda.com/api/payment/xendit/callback`
+     - **Duitku:** `https://domain-anda.com/api/payment/duitku/callback`
+  2. Pastikan file `settings.json` memiliki `app_url` dengan awalan `https://`.
+  3. **Tindakan Darurat Admin:** Jika pelanggan sudah menunjukkan bukti transfer sah dari bank, admin dapat langsung melunasi tagihan secara manual via bot: ketik `lunas <ID_INVOICE>` atau via web portal klik "Tandai Lunas". Sistem akan langsung mengaktifkan pelanggan seketika.
+
+#### B. Notifikasi Mutasi Otomatis (MacroDroid / SMS Banking) Tidak Masuk
+* **Penyebab Utama:** Aplikasi MacroDroid di smartphone penampung mutasi terhenti oleh manajemen daya Android (battery saver), atau izin membaca SMS dicabut.
+* **Langkah Solusi Konkret:**
+  1. Buka pengaturan HP: Nonaktifkan optimasi baterai (Don't optimize / Unrestricted) untuk MacroDroid.
+  2. Aktifkan fitur "Autostart" dan kunci aplikasi MacroDroid di recent apps.
+  3. Tes kirim HTTP POST webhook dari browser/Postman ke endpoint `/api/callback/mutasi` untuk memastikan server merespon `200 OK`.
+
+---
+
+### 6. KENDALA WHATSAPP GATEWAY (BAILEYS)
+
+#### A. Pesan "Menunggu pesan ini. Ini mungkin perlu waktu" (Waiting for this message)
+* **Penyebab Utama:** Sesi enkripsi end-to-end Signal Protocol belum selesai melakukan handshake prekeys antara server bot dan WhatsApp pengirim. Hal ini lumrah terjadi jika bot baru direstart atau nomor baru pertama kali chat.
+* **Langkah Solusi Konkret:**
+  1. Sistem billing sudah dilengkapi `BaileysCacheStore` dan `MultiLayerMessageStore` untuk merespon retry prekey secara otomatis.
+  2. Minta pengirim mengirimkan 1 pesan teks biasa lagi (misal "Halo" atau "Tes") agar kunci sesi terkunci dan pesan sebelumnya langsung terbaca.
+  3. Hindari me-restart service bot berulang kali tanpa jeda.
+
+#### B. WhatsApp Bot Sering Terputus / Logout (401 Unauthorized / Connection Closed)
+* **Penyebab Utama:** Sesi WhatsApp dikeluarkan dari aplikasi HP ("Perangkat Tertaut" terputus), atau HP bot kehabisan baterai/internet mati lama.
+* **Langkah Solusi Konkret:**
+  1. Buka Web Admin -> WhatsApp Gateway -> Klik tombol "Reset Sesi".
+  2. Buka WhatsApp di smartphone bot -> Perangkat Tertaut -> Tautkan Perangkat.
+  3. Pindai ulang QR Code yang muncul di layar.
+  4. Pastikan smartphone bot selalu terhubung ke Wi-Fi yang stabil dan charger terpasang.
+
+---
+
+### 7. KENDALA TELEGRAM BOT
+
+#### A. Error `deleteWebHook` atau Polling 409 Conflict di Log Server
+* **Penyebab Utama:** Ada dua script/proses yang berjalan bersamaan menggunakan Token Bot Telegram yang sama (misal proses dev di laptop dan proses produksi di server berjalan bersama).
+* **Langkah Solusi Konkret:**
+  1. Pastikan hanya ada 1 proses bot Telegram yang hidup di seluruh server/komputer.
+  2. Di server: jalankan `pm2 restart billing`. Jangan jalankan `node app.js` manual di terminal lain jika PM2 sudah aktif.
+
+#### B. Perintah Admin di Telegram Ditolak ("Akses Ditolak")
+* **Penyebab Utama:** ID Telegram pengirim belum didaftarkan di pengaturan `telegram_admin_id`.
+* **Langkah Solusi Konkret:**
+  1. Chat bot `@userinfobot` di Telegram untuk mengetahui User ID akun Telegram Anda (contoh: `123456789`).
+  2. Masuk ke Web Admin -> Pengaturan (Settings) -> Telegram Bot -> Masukkan angka User ID tersebut pada kolom `telegram_admin_id`.
+  3. Klik Simpan. Bot akan langsung mengenali Anda sebagai Admin penuh.
+
+---
+
+### 8. KENDALA FREERADIUS SERVER
+
+#### A. Autentikasi PPPoE / Hotspot Ditolak (Auth-Reject di Log RADIUS)
+* **Penyebab Utama:** String `secret` di konfigurasi MikroTik `/radius` tidak sama dengan `secret` di file `/etc/freeradius/3.0/clients.conf` server.
+* **Langkah Solusi Konkret:**
+  1. Di MikroTik: jalankan `/radius print detail`, catat `secret`.
+  2. Di server Linux: buka `/etc/freeradius/3.0/clients.conf`, pastikan IP router dan secret-nya cocok:
+     `client mikrotik { ipaddr = 192.168.8.1; secret = passwordradius123; }`
+  3. Restart FreeRADIUS: `sudo systemctl restart freeradius`.
+
+---
+
+### 9. KENDALA DIGIFLAZZ (PPOB & PULSA)
+
+#### A. Transaksi Pulsa / Paket Data Gagal (Error RC 40, RC 41, atau RC 42)
+* **Penyebab Utama:**
+  1. **RC 40 / 41:** IP Publik server billing belum didaftarkan di Whitelist IP Digiflazz.
+  2. **RC 42:** Saldo deposit Digiflazz tidak mencukupi untuk memproses pesanan.
+* **Langkah Solusi Konkret:**
+  1. Cek saldo Digiflazz via bot: ketik `saldodigi` (admin).
+  2. Jika IP belum terdaftar: Login ke Member Area Digiflazz -> Pengaturan -> Koneksi API -> Tambahkan IP Publik server billing Anda ke Whitelist IP.
+  3. Lakukan topup deposit Digiflazz melalui transfer bank tiket deposit di dashboard Digiflazz.
+
+---
+
+### 10. KENDALA DATABASE SQLITE & SERVER MAINTENANCE
+
+#### A. Error `SQLITE_BUSY: database is locked`
+* **Penyebab Utama:** Banyak query penulisan ke database SQLite secara serempak tanpa mode WAL.
+* **Langkah Solusi Konkret:**
+  1. Sistem billing ini secara default telah menyertakan pengaturan performa tinggi:
+     `PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`
+  2. Jika sesekali terjadi lock karena proses berat: Restart service billing: `pm2 restart billing`.
+
+#### B. Cara Restore Database dari File Backup Otomatis
+* **Langkah Solusi Konkret:**
+  1. File backup tersimpan rapi setiap hari di folder `backups/billing_backup_YYYY-MM-DD_*.sqlite`.
+  2. Untuk memulihkan data:
+     ```bash
+     pm2 stop billing
+     cp backups/billing_backup_TERAKHIR.sqlite database.sqlite
+     pm2 start billing
+     ```
+
+---

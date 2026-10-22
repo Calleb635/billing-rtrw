@@ -326,6 +326,23 @@ function initTelegram() {
     const text = msg.text || '';
     if (!text || text === '/start' || text === '/menu') return;
 
+    // Konfirmasi penghapusan pelanggan oleh Admin di Telegram Private Chat
+    if (msg.chat.type === 'private' && isAdmin(msg) && /^ya\s+hapus\s+(\d+)[.!]?$/i.test(text.trim())) {
+      const match = text.trim().match(/^ya\s+hapus\s+(\d+)[.!]?$/i);
+      const custId = parseInt(match[1], 10);
+      const cust = customerSvc.getCustomerById(custId);
+      if (!cust) {
+        return bot.sendMessage(msg.chat.id, `❌ Pelanggan dengan ID #${custId} tidak ditemukan atau sudah dihapus.`, { reply_to_message_id: msg.message_id });
+      }
+      try {
+        await customerSvc.deleteCustomer(custId);
+        return bot.sendMessage(msg.chat.id, `🗑️ *PELANGGAN BERHASIL DIHAPUS*\n\nData pelanggan *${cust.name}* (ID: #${custId}, No HP: ${cust.phone || '-'}) telah dihapus dari sistem billing.`, { parse_mode: 'Markdown', reply_to_message_id: msg.message_id });
+      } catch (err) {
+        logger.error(`[TelegramBot] Gagal menghapus pelanggan #${custId}: ${err.message}`);
+        return bot.sendMessage(msg.chat.id, `❌ Gagal menghapus pelanggan #${custId}: ${err.message}`, { reply_to_message_id: msg.message_id });
+      }
+    }
+
     // 2. Deteksi Pertanyaan untuk AI Asisten (di Grup atau Private Chat)
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     const botUsername = botMe ? botMe.username.toLowerCase() : '';

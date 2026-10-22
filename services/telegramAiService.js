@@ -24,8 +24,8 @@ function loadKnowledgeBase() {
     if (fs.existsSync(docPath)) {
       const fullDoc = fs.readFileSync(docPath, 'utf8');
       
-      // Ambil inti fitur dan bersihkan format berlebih jika terlalu panjang
-      cachedKnowledge = fullDoc.length > 50000 ? fullDoc.substring(0, 48000) + '\n\n...(dokumentasi dipotong untuk efisiensi context)...' : fullDoc;
+      // Ambil seluruh dokumentasi fitur & panduan pemecahan masalah (mendukung context besar Gemini)
+      cachedKnowledge = fullDoc.length > 350000 ? fullDoc.substring(0, 340000) + '\n\n...(dokumentasi dipotong untuk efisiensi context)...' : fullDoc;
       lastLoadTime = now;
       logger.info(`[TelegramAI] Knowledge base loaded (${cachedKnowledge.length} bytes).`);
       return cachedKnowledge;
@@ -230,7 +230,7 @@ Pedoman Jawaban dan Eksekusi untuk Admin:
 1. AKURAT & KOMPREHENSIF: Anda memiliki akses ke data operasional live server billing, MikroTik, dan GenieACS di bawah ini. Jawablah setiap pertanyaan admin mengenai status pelanggan, tagihan, isolir, router, atau modem berdasarkan data live tersebut secara presisi.
 2. PERTANYAAN KHUSUS PELANGGAN: Jika admin menanyakan pelanggan tertentu (misal: "apakah diva nunggak?", "cek redaman diva", "siapa yang terisolir?", "kenapa pelanggan X putus?"), sebutkan data lengkapnya (status billing, tunggakan, modem/redaman, pppoe) secara profesional dan to the point.
 3. PERTANYAAN GLOBAL / OPERASIONAL: Jika admin menanyakan ringkasan (misal: "berapa pelanggan yang isolir?", "siapa saja yang belum bayar?", "total uang tunggakan?"), rangkum dengan angka pasti dan sebutkan nama-nama pelanggan yang bersangkutan secara rapi.
-4. PERTANYAAN SISTEM & TEKNIS: Jika admin menanyakan fitur aplikasi atau konfigurasi teknis MikroTik/GenieACS/OLT/Radius, rujuk ke DOKUMENTASI SISTEM di bawah.
+4. PERTANYAAN SISTEM, TEKNIS, & TROUBLESHOOTING: Anda menguasai seluruh fitur aplikasi, alur kerja sistem, dan solusi pemecahan masalah operasional (misal: MikroTik API timeout/tidak konek, pelanggan isolir tapi masih internetan atau sebaliknya, redaman modem jelek/LOS, webhook QRIS/payment gateway tidak otomatis lunas, WhatsApp menunggu pesan ini, FreeRADIUS auth reject, dll.). Rujuk ke DOKUMENTASI SISTEM & PANDUAN PEMECAHAN MASALAH di bawah untuk memberikan diagnosis penyebab dan solusi langkah demi langkah secara sistematis, teknis, dan tepat sasaran.
 5. EKSEKUSI PERINTAH ADMINISTRATIF VIA TOOLS: Anda DILENGKAPI DENGAN FUNCTION TOOLS untuk mengeksekusi aksi administratif. Jika pesan admin mengandung instruksi / perintah tindakan (misal: tambah pelanggan, hapus pelanggan, reboot/restart modem ONU, ganti password/SSID WiFi, lunasi tagihan, isolir, buka isolir, kick user aktif, buat voucher hotspot, generate invoice bulanan, cek saldo digiflazz, atau top up agent), PANGGIL FUNCTION TOOL YANG SESUAI dengan parameter yang diekstrak dari percakapan.
 - Untuk hapus pelanggan: SELALU panggil tool 'delete_customer_request' agar sistem meminta konfirmasi 2 langkah yang aman.
 - Untuk tambah pelanggan: Panggil 'add_customer' dengan mengekstrak nama, nomor telepon WhatsApp, paket (jika ada), area, alamat, dan username/password PPPoE (jika ditentukan).
@@ -265,7 +265,7 @@ Jika pelanggan bertanya mengenai sisa tagihan, status pembayaran, jumlah uang ya
     systemInstruction = `Anda adalah "Asisten AI Komunitas & Layanan Pelanggan RTRW-Net", asisten cerdas yang ramah dan membantu untuk grup diskusi dan layanan pelanggan WhatsApp "RTRWNET Management & Billing System" (Botlokal).
 
 Pedoman Jawaban:
-1. TERKAIT APLIKASI & LAYANAN: Jika pertanyaan berkaitan dengan aplikasi RTRWNET / Botlokal (seperti Billing, MikroTik, GenieACS TR-069, OLT SNMP, Payment Gateway, WhatsApp Baileys, Portal Pelanggan, Voucher, isolir, dll.), jawablah secara mendalam, akurat, dan mengacu pada DOKUMENTASI SISTEM di bawah ini.
+1. TERKAIT APLIKASI, FITUR, & SOLUSI KENDALA: Jika pertanyaan berkaitan dengan aplikasi RTRWNET / Botlokal, panduan fitur, cara bayar, cara ganti sandi wifi, atau troubleshooting kendala jaringan (misal: wifi lambat, tidak bisa internetan, redaman jelek, lampu modem merah/LOS, cara isolir, voucher hotspot), jawablah secara mendalam, akurat, solutif, dan mengacu pada DOKUMENTASI SISTEM & PANDUAN PEMECAHAN MASALAH di bawah ini.
 2. PERTANYAAN DATA TAGIHAN / STATUS PRIBADI PELANGGAN: Jika ada DATA STATUS LIVE PELANGGAN di bawah, gunakan informasi riil tersebut untuk menjawab pertanyaan pribadi pelanggan tersebut secara presisi.
 3. PERTANYAAN UMUM / DI LUAR APLIKASI: Jika pertanyaan mengenai hal umum di luar aplikasi (misalnya konsep jaringan komputer, MikroTik dasar, Linux/server, tips teknologi, coding, atau obrolan santai), Anda TETAP BISA menjawab dengan ramah, cerdas, solutif, dan informatif.
 4. Gaya Bahasa: Gunakan Bahasa Indonesia yang santun, bersahabat, jelas, dan profesional.
@@ -455,6 +455,107 @@ function getOfflineAnswer(question, customerContext = null, isAdmin = false, adm
       return `Halo Kak *${customerContext.customerName}*,\n\n` +
         `✅ *Semua tagihan internet Anda sudah LUNAS!* Tidak ada tunggakan saat ini.\nTerima kasih atas kerja samanya. 🙏`;
     }
+  }
+
+  // --- DIAGNOSTIK & PEMECAHAN MASALAH (TROUBLESHOOTING) ---
+
+  // 1. Masalah Sudah Lunas tapi Masih Isolir
+  if (q.includes('masih isolir') || (q.includes('sudah bayar') && q.includes('isolir')) || (q.includes('lunas') && q.includes('isolir')) || q.includes('sudah bayar tapi')) {
+    return `💡 *Solusi: Sudah Lunas Tapi Masih Terisolir*\n\n` +
+      `*Penyebab:* IP pelanggan masih tersangkut di address-list isolir MikroTik atau profile PPPoE belum dial-up ulang.\n\n` +
+      `*Langkah Perbaikan:*\n` +
+      `1. *Via Web Billing:* Buka Data Pelanggan ➜ Klik tombol *"Buka Isolir"*.\n` +
+      `2. *Via Bot WA/Telegram:* Ketik perintah: \`buka <nama/id_pelanggan>\`.\n` +
+      `3. *Via MikroTik (Darurat):*\n` +
+      `   • Hapus IP di: \`/ip firewall address-list remove [find address="<IP>"]\`\n` +
+      `   • Kick sesi aktif: \`/interface pppoe-server remove [find user="<username>"]\``;
+  }
+
+  // 2. Masalah Terisolir tapi Masih Bisa Internetan
+  if (q.includes('masih bisa') && (q.includes('isolir') || q.includes('suspend') || q.includes('putus'))) {
+    return `💡 *Solusi: Pelanggan Isolir Tapi Masih Bisa Internetan*\n\n` +
+      `*Penyebab:* Sesi PPPoE aktif belum diputus (masih pegang IP lama) atau rule NAT isolir posisinya di bawah rule masquerade umum.\n\n` +
+      `*Langkah Perbaikan:*\n` +
+      `1. Kick sesi aktif pelanggan via bot: \`kickuser <username>\` agar router mengalokasikan IP isolir.\n` +
+      `2. Pindahkan NAT Rule isolir ke *urutan teratas* di Winbox (\`/ip firewall nat\`).\n` +
+      `3. Tambahkan drop/redirect DNS port 53 untuk address-list ISOLIR agar tidak bypass via DNS publik (8.8.8.8 / 1.1.1.1).\n` +
+      `4. Pastikan opsi \`auto_isolate\` pada data pelanggan bernilai \`1\`.`;
+  }
+
+  // 3. Masalah Koneksi MikroTik API (Timeout / Gagal Konek)
+  if (q.includes('tidak bisa konek') || q.includes('gagal konek') || q.includes('api timeout') || q.includes('port 8728') || q.includes('port 8729') || q.includes('service api')) {
+    return `🔧 *Solusi: Gagal Terhubung ke MikroTik API (Port 8728 / 8729)*\n\n` +
+      `*Penyebab:* Service API nonaktif di router, port API salah, atau firewall MikroTik memblokir input port API.\n\n` +
+      `*Langkah Perbaikan di Winbox/Terminal MikroTik:*\n` +
+      `1. Aktifkan service API:\n` +
+      `   \`/ip service enable api; /ip service set api port=8728\`\n` +
+      `2. Buka izin firewall input:\n` +
+      `   \`/ip firewall filter add chain=input protocol=tcp dst-port=8728 action=accept place-before=0 comment="Allow Billing API"\`\n` +
+      `3. Periksa Web Admin ➜ Menu Routers:\n` +
+      `   • Pastikan Host IP, Port, User, dan Password sama persis dengan yang bisa login Winbox.\n` +
+      `   • Disarankan membuat user khusus API dengan group \`full\`.`;
+  }
+
+  // 4. Masalah Redaman Optik / LOS Lampu Merah
+  if ((q.includes('redaman') && (q.includes('jelek') || q.includes('tinggi') || q.includes('drop') || q.includes('dbm') || q.includes('solusi') || q.includes('masalah') || q.includes('kenapa') || q.includes('buruk'))) || q.includes('los') || q.includes('lampu merah') || q.includes('kabel putus') || q.includes('rx power')) {
+    return `📡 *Panduan Redaman Optik & Solusi LOS (Lampu Merah)*\n\n` +
+      `*Kategori Nilai Redaman (RX Power):*\n` +
+      `• *-15 dBm s/d -22 dBm:* Sangat Baik / Ideal (Koneksi stabil)\n` +
+      `• *-23 dBm s/d -25 dBm:* Cukup / Ambang Batas Aman\n` +
+      `• *-26 dBm s/d -28 dBm:* Buruk (Packet loss / throughput drop)\n` +
+      `• *> -28 dBm s/d -32 dBm:* Kritis (Sering putus-nyambung)\n` +
+      `• *LOS (Lampu Merah / RX < -35 dBm):* Putus Total\n\n` +
+      `*Langkah Perbaikan:*\n` +
+      `1. *Jika redaman -25 s/d -28 dBm:* Bersihkan ujung konektor SC patchcord dengan alkohol isopropil, cek tekukan kabel dropcore.\n` +
+      `2. *Jika LOS (Merah):* Cek redaman di output ODP dengan OPM. Jika di ODP bagus tapi di rumah pelanggan LOS, lacak kabel putus menggunakan VFL (Laser Optik) lalu lakukan splicing ulang.`;
+  }
+
+  // 5. Masalah Webhook / Payment Gateway / QRIS
+  if (q.includes('webhook') || (q.includes('qris') && (q.includes('gagal') || q.includes('belum lunas') || q.includes('unpaid') || q.includes('tidak otomatis')))) {
+    return `💳 *Solusi: Pembayaran QRIS / Gateway Tidak Otomatis Lunas*\n\n` +
+      `*Penyebab:* URL callback webhook di dashboard merchant gateway belum sesuai atau server belum HTTPS.\n\n` +
+      `*Langkah Perbaikan:*\n` +
+      `1. Daftarkan URL Callback di Dashboard Merchant:\n` +
+      `   • Tripay: \`https://domain-anda.com/api/payment/tripay/callback\`\n` +
+      `   • Midtrans: \`https://domain-anda.com/api/payment/midtrans/callback\`\n` +
+      `   • Xendit: \`https://domain-anda.com/api/payment/xendit/callback\`\n` +
+      `   • Duitku: \`https://domain-anda.com/api/payment/duitku/callback\`\n` +
+      `2. Pastikan \`app_url\` di \`settings.json\` menggunakan awalan \`https://\`.\n` +
+      `3. *Solusi Cepat Admin:* Jika bukti transfer sudah valid, lunaskan manual via bot: ketik \`lunas <ID_INVOICE>\`.`;
+  }
+
+  // 6. Masalah WhatsApp "Menunggu Pesan Ini" / Logout
+  if (q.includes('menunggu pesan ini') || q.includes('waiting for this message') || q.includes('wa logout') || q.includes('wa putus')) {
+    return `💬 *Solusi: WhatsApp "Menunggu Pesan Ini" / Sering Terputus*\n\n` +
+      `*Penyebab:* Handshake enkripsi Signal prekey antara Baileys dan WhatsApp pengirim belum selesai sinkronisasi.\n\n` +
+      `*Langkah Penanganan:*\n` +
+      `1. Minta pengirim mengirim 1 pesan teks biasa (misal "Halo" atau "Tes") agar kunci enkripsi tersinkronisasi otomatis.\n` +
+      `2. Hindari me-restart service WhatsApp tanpa jeda.\n` +
+      `3. Jika status bot 401 / Logout: Masuk Web Admin ➜ WhatsApp Gateway ➜ Klik *"Reset Sesi"* lalu scan ulang QR Code. Pastikan HP bot koneksi internetnya stabil dan mode hemat baterai dimatikan.`;
+  }
+
+  // 7. Masalah Telegram Bot
+  if (q.includes('telegram') && (q.includes('akses ditolak') || q.includes('conflict') || q.includes('409') || q.includes('tidak respon'))) {
+    return `🤖 *Solusi Kendala Bot Telegram*\n\n` +
+      `1. *Akses Ditolak:* Masukkan ID Telegram Anda ke \`telegram_admin_id\` di Web Admin ➜ Pengaturan ➜ Telegram Bot. (Cek ID Anda via @userinfobot).\n` +
+      `2. *Polling 409 Conflict / deleteWebHook:* Terjadi jika ada 2 proses bot yang berjalan bersamaan dengan token yang sama. Hentikan proses dev di lokal atau restart PM2: \`pm2 restart billing\`.`;
+  }
+
+  // 8. Masalah Database SQLite Locked
+  if (q.includes('database is locked') || q.includes('sqlite_busy') || q.includes('restore database')) {
+    return `🗄️ *Solusi: Database Locked & Restore Backup SQLite*\n\n` +
+      `1. *Database Locked:* Terjadi saat transaksi write menumpuk. Sistem sudah mengaktifkan WAL mode. Jika stuck, restart service: \`pm2 restart billing\`.\n` +
+      `2. *Restore Database:* File backup harian ada di folder \`backups/\`.\n` +
+      `   Perintah restore:\n` +
+      `   \`pm2 stop billing && cp backups/billing_backup_TERAKHIR.sqlite database.sqlite && pm2 start billing\``;
+  }
+
+  // 9. Masalah Digiflazz
+  if (q.includes('digiflazz') && (q.includes('gagal') || q.includes('rc 40') || q.includes('rc 41') || q.includes('rc 42') || q.includes('saldo habis'))) {
+    return `🏦 *Solusi: Kendala Transaksi Pulsa Digiflazz*\n\n` +
+      `• *RC 40 / 41 (IP Not Allowed):* Daftarkan IP Publik server billing Anda ke Whitelist IP di Member Area Digiflazz (Pengaturan ➜ Koneksi API).\n` +
+      `• *RC 42 (Saldo Kurang):* Saldo deposit Digiflazz tidak cukup. Cek via bot: \`saldodigi\` dan lakukan top up deposit di dashboard Digiflazz.\n` +
+      `• *Cek Status:* Gunakan perintah: \`cekpulsa <TXID>\`.`;
   }
 
   if (q.includes('isolir') || q.includes('putus') || q.includes('tunggak')) {
