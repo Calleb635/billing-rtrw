@@ -1,4 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
+const https = require('https');
 const { getSetting, getNowLocal } = require('../config/settingsManager');
 const { logger } = require('../config/logger');
 const customerSvc = require('./customerService');
@@ -360,9 +361,11 @@ function initTelegram() {
       bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
 
       try {
+        const isPrivAdmin = msg.chat.type === 'private' && isAdmin(msg);
         const answer = await telegramAi.askAi({
           question: cleanQuestion,
-          senderName: msg.from.first_name || 'Rekan'
+          senderName: msg.from.first_name || 'Rekan',
+          isAdmin: Boolean(isPrivAdmin)
         });
 
         await bot.sendMessage(msg.chat.id, answer, {
@@ -1182,5 +1185,96 @@ function initTelegram() {
   });
 }
 
-// Export for manual re-init from settings
-module.exports = { initTelegram };
+/**
+ * Konversi angka ke kalimat terbilang bahasa Indonesia
+ */
+function terbilang(n) {
+  const bilangan = ['', 'satu', 'dua', 'tiga', 'empat', 'lima', 'enam', 'tujuh', 'delapan', 'sembilan', 'sepuluh', 'sebelas'];
+  n = Math.floor(Number(n) || 0);
+  if (n < 12) return bilangan[n];
+  if (n < 20) return terbilang(n - 10) + ' belas';
+  if (n < 100) return terbilang(Math.floor(n / 10)) + ' puluh' + (n % 10 !== 0 ? ' ' + terbilang(n % 10) : '');
+  if (n < 200) return 'seratus' + (n - 100 !== 0 ? ' ' + terbilang(n - 100) : '');
+  if (n < 1000) return terbilang(Math.floor(n / 100)) + ' ratus' + (n % 100 !== 0 ? ' ' + terbilang(n % 100) : '');
+  if (n < 2000) return 'seribu' + (n - 1000 !== 0 ? ' ' + terbilang(n - 1000) : '');
+  if (n < 1000000) return terbilang(Math.floor(n / 1000)) + ' ribu' + (n % 1000 !== 0 ? ' ' + terbilang(n % 1000) : '');
+  if (n < 1000000000) return terbilang(Math.floor(n / 1000000)) + ' juta' + (n % 1000000 !== 0 ? ' ' + terbilang(n % 1000000) : '');
+  return n.toLocaleString('id-ID');
+}
+
+/**
+ * Generate audio buffer MP3 dari Google TTS Bahasa Indonesia
+ */
+function generateTtsAudio(text) {
+  return new Promise((resolve, reject) => {
+    const cleanText = String(text || '').trim();
+    if (!cleanText) return resolve(Buffer.alloc(0));
+    const url = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' + encodeURIComponent(cleanText) + '&tl=id&client=tw-ob';
+    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }, (res) => {
+      if (res.statusCode !== 200) return reject(new Error('TTS status code ' + res.statusCode));
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
+
+/**
+ * Kirim Pesan Suara (Voice Note / Audio) ke Telegram Admin
+ */
+async function sendAdminVoiceNotification(text, caption = '') {
+  try {
+    const adminId = getSetting('telegram_admin_id', '');
+    if (!adminId) return false;
+
+    let activeBot = bot;
+    if (!activeBot) {
+      const token = getSetting('telegram_bot_token', '');
+      if (token) {
+        activeBot = new TelegramBot(token);
+      }
+    }
+    if (!activeBot) return false;
+
+    const audioBuf = await generateTtsAudio(text);
+    if (!audioBuf || audioBuf.length === 0) return false;
+
+    const formattedCaption = caption || `🔔 *NOTIFIKASI TRANSAKSI MASUK*\n\n💬 _${text}_`;
+
+    try {
+      await activeBot.sendVoice(adminId, audioBuf, {
+        caption: formattedCaption,
+        parse_mode: 'Markdown'
+      }, {
+        filename: 'notif_dana.ogg',
+        contentType: 'audio/ogg'
+      });
+      logger.info(`[Telegram TTS] Voice note berhasil dikirim ke Admin (${adminId}): "${text}"`);
+      return true;
+    } catch (voiceErr) {
+      logger.warn('[Telegram TTS] sendVoice fallback to sendAudio: ' + voiceErr.message);
+      await activeBot.sendAudio(adminId, audioBuf, {
+        caption: formattedCaption,
+        title: 'Notifikasi Transaksi Masuk',
+        performer: getSetting('company_header', 'Billing RTRW'),
+        parse_mode: 'Markdown'
+      }, {
+        filename: 'notif_transaksi.mp3',
+        contentType: 'audio/mpeg'
+      });
+      logger.info(`[Telegram TTS] Audio MP3 berhasil dikirim ke Admin (${adminId}): "${text}"`);
+      return true;
+    }
+  } catch (err) {
+    logger.error('[Telegram TTS] Gagal mengirim notifikasi suara: ' + err.message);
+    return false;
+  }
+}
+
+// Export for manual re-init from settings & external triggers
+module.exports = {
+  initTelegram,
+  sendAdminVoiceNotification,
+  generateTtsAudio,
+  terbilang
+};

@@ -449,17 +449,29 @@ function parseRupiahAmountFromNotification(content) {
     'top up berhasil', 'topup berhasil', 'terima uang', 'telah diterima dari',
     'diterima dari', 'qris berhasil', 'qris sukses', 'qr berhasil', 'qr sukses',
     'payment received', 'kamu menerima', 'berhasil menerima', 'menambahkan',
-    'telah diterima sebesar', 'uang diterima'
+    'telah diterima sebesar', 'uang diterima', 'diterima', 'terima transfer',
+    'transfer dari', 'kamu dapat', 'kamu dapet'
   ];
   const outgoingHints = [
     'mengirim', 'terkirim', 'telah dikirim', 'berhasil kirim', 'transfer ke',
-    'bayar ke', 'pembayaran berhasil', 'berhasil bayar', 'pembelian',
-    'belanja', 'purchase', 'kamu membayar', 'transaksi keluar', 'debit',
-    'dikenakan biaya', 'potongan'
+    'bayar ke', 'pembelian', 'belanja', 'purchase', 'kamu membayar',
+    'transaksi keluar', 'debit', 'dikenakan biaya', 'potongan'
   ];
 
-  const hasIncomingHint = incomingHints.some((hint) => lower.includes(hint));
-  const hasOutgoingHint = outgoingHints.some((hint) => lower.includes(hint));
+  const hasIncomingHint = incomingHints.some((hint) => lower.includes(hint)) ||
+    (lower.includes('qris') && lower.includes('berhasil')) ||
+    (lower.includes('m-transfer') && lower.includes('cr'));
+
+  const isIncomingOverride = lower.includes('diterima') ||
+    lower.includes('masuk') ||
+    lower.includes('kamu menerima') ||
+    lower.includes('berhasil menerima') ||
+    lower.includes('terima transfer');
+
+  const hasOutgoingHint = outgoingHints.some((hint) => {
+    if (isIncomingOverride && (hint === 'pembayaran berhasil' || hint === 'berhasil bayar')) return false;
+    return lower.includes(hint);
+  });
 
   // WAJIB: Harus ada indikator uang masuk dan TIDAK BOLEH ada indikator uang keluar
   if (!hasIncomingHint || hasOutgoingHint) {
@@ -991,6 +1003,25 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
             const methodLabel = service ? `QRIS (${String(service)})` : 'QRIS';
             try { await trySendWaPaymentSuccess(getSettingsWithCache(), invId, methodLabel); } catch {}
             logger.info(`[WEBHOOK][payment-notif] MATCH invoice=${invId} amount=${amount}`);
+
+            // Kirim notifikasi suara TTS ke Telegram Admin
+            try {
+              const { sendAdminVoiceNotification, terbilang } = require('./services/telegramBot');
+              const custRow = custId > 0 ? db.prepare('SELECT name FROM customers WHERE id = ?').get(custId) : null;
+              const customerName = custRow?.name || 'Pelanggan';
+              const ttsText = `Dana masuk sebesar ${terbilang(amount)} rupiah ke rekening ${service || 'e-wallet'} untuk pelunasan tagihan pelanggan ${customerName}.`;
+              sendAdminVoiceNotification(
+                ttsText,
+                `🔔 *NOTIFIKASI DANA MASUK (TAGIHAN)*\n\n` +
+                `👤 *Pelanggan:* ${customerName}\n` +
+                `💰 *Nominal:* Rp ${Number(amount).toLocaleString('id-ID')}\n` +
+                `🏦 *Sumber Rekening:* ${service || 'E-Wallet'}\n` +
+                `🧾 *No. Invoice:* #${invId}\n` +
+                `📌 *Status:* LUNAS ✅`
+              ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+            } catch (ttsErr) {
+              logger.warn('[WEBHOOK] TTS voice notification error: ' + ttsErr.message);
+            }
           }
           } else if (Array.isArray(vCandidates) && vCandidates.length === 1) {
             const ord = vCandidates[0];
@@ -1007,6 +1038,24 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
               } catch (e) {
                 logger.error(`[WEBHOOK][payment-notif] Voucher fulfill error: ${e?.message || e}`);
               }
+
+              // Kirim notifikasi suara TTS ke Telegram Admin untuk Voucher Hotspot
+              try {
+                const { sendAdminVoiceNotification, terbilang } = require('./services/telegramBot');
+                const pkgName = ord.profile_name || 'Hotspot';
+                const ttsText = `Pembelian voucher hotspot paket ${pkgName} sebesar ${terbilang(amount)} rupiah berhasil diterima.`;
+                sendAdminVoiceNotification(
+                  ttsText,
+                  `🔔 *NOTIFIKASI DANA MASUK (VOUCHER)*\n\n` +
+                  `📦 *Paket:* ${pkgName}\n` +
+                  `💰 *Nominal:* Rp ${Number(amount).toLocaleString('id-ID')}\n` +
+                  `🏦 *Sumber Rekening:* ${service || 'E-Wallet'}\n` +
+                  `🧾 *No. Order:* #${ordId}\n` +
+                  `📌 *Status:* BERHASIL ✅`
+                ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+              } catch (ttsErr) {
+                logger.warn('[WEBHOOK] TTS voucher voice notification error: ' + ttsErr.message);
+              }
             }
           } else if (Array.isArray(dCandidates) && dCandidates.length === 1) {
             const don = dCandidates[0];
@@ -1022,6 +1071,23 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
                 await fulfillDonationOrder(getSettingsWithCache(), donId);
               } catch (e) {
                 logger.error(`[WEBHOOK][payment-notif] Donation fulfill error: ${e?.message || e}`);
+              }
+
+              // Kirim notifikasi suara TTS ke Telegram Admin untuk Donasi
+              try {
+                const { sendAdminVoiceNotification, terbilang } = require('./services/telegramBot');
+                const donorName = don.donor_name || 'Hamba Allah';
+                const ttsText = `Donasi masuk sebesar ${terbilang(amount)} rupiah dari ${donorName} berhasil diterima.`;
+                sendAdminVoiceNotification(
+                  ttsText,
+                  `🔔 *NOTIFIKASI DANA MASUK (DONASI)*\n\n` +
+                  `👤 *Donatur:* ${donorName}\n` +
+                  `💰 *Nominal:* Rp ${Number(amount).toLocaleString('id-ID')}\n` +
+                  `🏦 *Sumber Rekening:* ${service || 'E-Wallet'}\n` +
+                  `📌 *Status:* DITERIMA ✅`
+                ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+              } catch (ttsErr) {
+                logger.warn('[WEBHOOK] TTS donation voice notification error: ' + ttsErr.message);
               }
             }
           } else if (Array.isArray(tCandidates) && tCandidates.length === 1) {
@@ -1082,6 +1148,25 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
                 }
               } catch (waErr) {
                 logger.error(`[WEBHOOK][payment-notif] Top-up WA notification error: ${waErr?.message || waErr}`);
+              }
+
+              // Kirim notifikasi suara TTS ke Telegram Admin untuk Topup Saldo
+              try {
+                const { sendAdminVoiceNotification, terbilang } = require('./services/telegramBot');
+                const customer = db.prepare('SELECT name FROM customers WHERE id = ?').get(custId);
+                const custName = customer?.name || 'Pelanggan';
+                const ttsText = `Top up saldo sebesar ${terbilang(baseAmount)} rupiah untuk pelanggan ${custName} berhasil diverifikasi.`;
+                sendAdminVoiceNotification(
+                  ttsText,
+                  `🔔 *NOTIFIKASI DANA MASUK (TOP-UP SALDO)*\n\n` +
+                  `👤 *Pelanggan:* ${custName}\n` +
+                  `💰 *Nominal Top-Up:* Rp ${Number(baseAmount).toLocaleString('id-ID')}\n` +
+                  `🏦 *Sumber Rekening:* ${service || 'E-Wallet'}\n` +
+                  `🆔 *ID Transaksi:* TOPUP-${topupId}\n` +
+                  `📌 *Status:* BERHASIL ✅`
+                ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+              } catch (ttsErr) {
+                logger.warn('[WEBHOOK] TTS topup voice notification error: ' + ttsErr.message);
               }
             }
           }

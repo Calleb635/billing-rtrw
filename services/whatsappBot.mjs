@@ -698,9 +698,17 @@ function parseCommand(text, isAdmin) {
 
   if (['menu', 'bantuan', 'help'].includes(cmd)) return { cmd: 'menu', rest: '' };
 
-  // Deteksi ping / salam pembuka: 'p', 'p.', 'assalamualaikum', 'halo', 'hai', 'selamat pagi/siang/sore/malam'
-  if (/^p+\.?$/i.test(t) || /^(assalamu['\s]?alaikum|assalamualaikum|aslm|samlikum|shalom|halo|hai|selamat\s+(pagi|siang|sore|malam))/i.test(t)) {
+  // Deteksi ping / salam pembuka: 'p', 'p.', 'assalamualaikum', 'halo', 'hai', 'selamat pagi/siang/sore/malam' (Hanya jika salam murni tanpa pertanyaan lanjutan)
+  if (/^p+\.?$/i.test(t) || /^(assalamu['\s]?alaikum|assalamualaikum|aslm|samlikum|shalom|halo|hai|selamat\s+(pagi|siang|sore|malam))[!.,\s]*$/i.test(t)) {
     return { cmd: 'greeting', raw: t };
+  }
+
+  if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
+    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
+  }
+
+  if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
+    return { cmd: 'agent_saldo' };
   }
 
   if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
@@ -788,6 +796,12 @@ function parseCommand(text, isAdmin) {
   if (t.endsWith('?') && t.length >= 6) {
     return { cmd: 'ai_ask', prefix: 'question', rest: t };
   }
+
+  // Khusus Nomor Admin WhatsApp: Jika bukan perintah baku di atas, otomatis diteruskan sebagai percakapan santai dengan AI (Opsi 1)
+  if (isAdmin) {
+    return { cmd: 'ai_ask', prefix: 'admin_chat', rest: t, isAdmin: true };
+  }
+
   return null;
 }
 
@@ -996,8 +1010,8 @@ ${sep}
 🔗 \`daftar\` _tag/nomor_ — Bind nomor WA
 🤖 \`tanya\` _pertanyaan_ — Tanya Asisten AI
 
-${sep}
-${footerInfo ? footerInfo : '💡 *Contoh:* `cektagihan`'}`;
+  ${sep}
+  ${footerInfo ? footerInfo : '💡 *Contoh:* `cektagihan`'}`;
 }
 
 function getAdminMenuText() {
@@ -1478,6 +1492,285 @@ export function getDefaultLidStore() {
  * Universal WhatsApp Bot Command Processor
  * Dapat dipanggil oleh Baileys, Fonnte Webhook, maupun Meta Cloud API Webhook
  */
+/**
+ * Deteksi Perintah Administratif Berbahasa Alami (Natural Language Admin Commands)
+ * Contoh:
+ * - "tolong dong lunasin pelanggan sobirin karena sudah bayar?"
+ * - "lunasin tagihan sobirin"
+ * - "buka isolir sobirin karena sudah bayar"
+ * - "tolong isolir pelanggan sobirin karena nunggak"
+ */
+export function detectAdminNaturalCommand(text) {
+  if (!text || typeof text !== 'string') return null;
+  let clean = text.trim();
+  // Buang tanda baca akhir seperti '?', '!', '.', ','
+  clean = clean.replace(/[\?\!\.,]+$/, '').trim();
+  if (clean.length < 4) return null;
+
+  const prefix = '^(?:(?:tolong|minta tolong|mohon|bisa tolong|bisa|dong)\\s+)*';
+  const target = '(?:pelanggan\\s+|tagihan\\s+|user\\s+|akun\\s+|atas\\s+nama\\s+|si\\s+)*([a-zA-Z0-9_\\-\\.\\s]+?)';
+  const suffix = '(?:\\s+(?:karena|sudah|udah|karna|nunggak|belum|yg|yang|via|sebesar|secepatnya|dong|ya|yah)\\b.*|$)';
+
+  // 1. Cek Buka Isolir (ditaruh sebelum isolir agar tidak bentrok)
+  const bukaMatch = clean.match(new RegExp(prefix + '(?:buka\\s+isolir|unisolir|buka|aktifkan(?:\\s+kembali)?)\\s+' + target + suffix, 'i'));
+  if (bukaMatch && bukaMatch[1] && bukaMatch[1].trim()) {
+    const t = bukaMatch[1].trim();
+    if (!['tagihan', 'pelanggan', 'user', 'menu', 'info'].includes(t.toLowerCase())) {
+      return { action: 'buka', target: t, raw: text };
+    }
+  }
+
+  // 2. Cek Isolir
+  const isolirMatch = clean.match(new RegExp(prefix + '(?:isolir|suspend|putus(?:\\s+sementara)?)\\s+' + target + suffix, 'i'));
+  if (isolirMatch && isolirMatch[1] && isolirMatch[1].trim()) {
+    const t = isolirMatch[1].trim();
+    if (!['tagihan', 'pelanggan', 'user', 'menu', 'info'].includes(t.toLowerCase())) {
+      return { action: 'isolir', target: t, raw: text };
+    }
+  }
+
+  // 3. Cek Lunas
+  const lunasMatch = clean.match(new RegExp(prefix + '(?:lunasin|tandai\\s+lunas|lunaskan|bayarkan|set\\s+lunas|lunas)\\s+' + target + suffix, 'i'));
+  if (lunasMatch && lunasMatch[1] && lunasMatch[1].trim()) {
+    const t = lunasMatch[1].trim();
+    if (!['tagihan', 'pelanggan', 'user', 'menu', 'info'].includes(t.toLowerCase())) {
+      return { action: 'lunas', target: t, raw: text };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Eksekusi Perintah Admin: Melunasi Tagihan
+ */
+export async function executeAdminLunas(targetIdRaw, reply, currentSockInstance, currentLidStore) {
+  logger.info(`[WA lunas] Memulai pemrosesan lunas untuk target: "${targetIdRaw}"`);
+  try {
+    const keyRaw = String(targetIdRaw || '').trim();
+    if (!keyRaw) {
+      logger.warn(`[WA lunas] Target kosong!`);
+      await reply('❌ Format: `lunas IDTAGIHAN` atau `lunas nama/nohp/pppoe/tag`');
+      return true;
+    }
+
+    let targetInvId = null;
+    let targetInv = null;
+    const isNumeric = /^\d+$/.test(keyRaw);
+    if (isNumeric) {
+      targetInvId = Number(keyRaw);
+      targetInv = billingSvc.getInvoiceById(targetInvId);
+      logger.info(`[WA lunas] Pencarian numerik ID Invoice: ${targetInvId} -> Found: ${!!targetInv}`);
+    }
+
+    // Jika belum ditemukan sebagai ID invoice langsung, cari customer & ambil tagihan tertunggaknya
+    if (!targetInv) {
+      let cust =
+        (isNumeric ? customerSvc.getCustomerById(Number(keyRaw)) : null) ||
+        customerSvc.findCustomerByAny(keyRaw);
+      logger.info(`[WA lunas] Pencarian customer untuk key: "${keyRaw}" -> Found: ${cust ? cust.name + " (ID:" + cust.id + ")" : 'null'}`);
+
+      if (!cust) {
+        const candidates = customerSvc.getAllCustomers(keyRaw) || [];
+        const unique = Array.from(new Map(candidates.map(c => [c.id, c])).values());
+        logger.info(`[WA lunas] Ditemukan ${unique.length} kandidat unik`);
+        if (unique.length === 1) {
+          cust = customerSvc.getCustomerById(unique[0].id);
+          logger.info(`[WA lunas] Menggunakan kandidat tunggal: ${cust.name}`);
+        } else if (unique.length > 1) {
+          const top = unique.slice(0, 5).map(c =>
+            `- ID:${c.id} • ${c.name || '-'} • ${c.phone || '-'} • PPPoE:${c.pppoe_username || '-'}`
+          ).join('\n');
+          await reply(`⚠️ Nama/ID tidak spesifik. Ditemukan ${unique.length} pelanggan:\n\n${top}\n\nKirim ulang: \`lunas IDPELANGGAN\` atau \`lunas NOHP/PPPOE/TAG\``);
+          return true;
+        }
+      }
+
+      if (cust) {
+        const unpaid = billingSvc.getUnpaidInvoicesByCustomerId(cust.id);
+        logger.info(`[WA lunas] Tagihan belum dibayar untuk customer ${cust.name}: ${unpaid ? unpaid.length : 0}`);
+        if (unpaid && unpaid.length > 0) {
+          targetInv = unpaid[0];
+          targetInvId = targetInv.id;
+        } else {
+          await reply(`✅ Pelanggan *${cust.name}* tidak memiliki tagihan menunggak.`);
+          return true;
+        }
+      }
+    }
+
+    if (!targetInv) {
+      logger.warn(`[WA lunas] Invoice/Customer tidak ditemukan untuk: "${keyRaw}"`);
+      await reply(`❌ Tagihan atau Pelanggan *${keyRaw}* tidak ditemukan.`);
+      return true;
+    }
+    if (targetInvId != null) {
+      const enriched = billingSvc.getInvoiceById(targetInvId);
+      if (enriched) targetInv = enriched;
+    }
+    if (targetInv && targetInv.status === 'paid') {
+      logger.info(`[WA lunas] Invoice #${targetInv.id} sudah paid`);
+      await reply(`✅ Invoice *#${targetInv.id}* sudah berstatus LUNAS.`);
+      return true;
+    }
+
+    logger.info(`[WA lunas] Menandai lunas invoice #${targetInvId}...`);
+    billingSvc.markAsPaid(targetInvId, 'WA Bot Admin', 'Paid via WhatsApp Command');
+
+    const customer = customerSvc.getCustomerById(targetInv.customer_id);
+    const formatter = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 });
+    const customerName = String(targetInv.customer_name || customer?.name || '-');
+    const notifyTag = customer?.genieacs_tag || customer?.pppoe_username || customer?.phone || targetInv.customer_phone || targetInv.genieacs_tag || '';
+    const custIdDisplay = customer?.id || targetInv.customer_id || '-';
+    const packageName = customer?.package_name || targetInv.package_name || '-';
+    const periodStr = formatIndonesianPeriod(targetInv.period_month, targetInv.period_year);
+    const totalBayarStr = formatter.format(Number(targetInv.amount || 0));
+
+    const tz = getSetting('timezone', 'Asia/Jakarta');
+    let tzSuffix = 'WIB';
+    if (/Makassar|Ujung_Pandang|Bali|Pontianak|Banjarmasin|Manado|Mataram|Kupang/i.test(tz)) tzSuffix = 'WITA';
+    else if (/Jayapura|Ambon|Papua|Maluku/i.test(tz)) tzSuffix = 'WIT';
+
+    const nowTimeStr = `${formatDateLocal(new Date())} ${tzSuffix}`;
+
+    // Ambil seluruh sisa invoice yang belum dibayar untuk pelanggan ini
+    const remainingUnpaid = (billingSvc.getUnpaidInvoicesByCustomerId(targetInv.customer_id) || [])
+      .filter(inv => Number(inv.id) !== Number(targetInvId));
+    const remainingSummary = formatUnpaidInvoicesSummary(remainingUnpaid);
+
+    const isSuspended = customer && customer.status === 'suspended';
+    let serviceStatusText = '';
+    let adminReplyNote = '';
+
+    if (isSuspended) {
+      if (remainingSummary.count === 0) {
+        logger.info(`[WA lunas] Mengaktifkan customer ID ${targetInv.customer_id}...`);
+        await customerSvc.activateCustomer(targetInv.customer_id);
+        serviceStatusText = `🟢 *Status Layanan:* AKTIF KEMBALI\n_Layanan internet Anda telah otomatis diaktifkan kembali._\n\n`;
+        adminReplyNote = `Pelanggan *${customerName}* otomatis diaktifkan kembali.`;
+      } else {
+        serviceStatusText = `⚠️ *Status Layanan:* TERISOLIR (Menunggu pelunasan sisa tunggakan)\n\n`;
+        adminReplyNote = `(Masih ada ${remainingSummary.count} tunggakan lain, isolir tetap aktif)`;
+      }
+    } else {
+      if (remainingSummary.count === 0) {
+        serviceStatusText = `🟢 *Status Layanan:* AKTIF\n_Semua tagihan internet Anda telah lunas. Terima kasih atas kerja samanya._\n\n`;
+      } else {
+        serviceStatusText = `🟢 *Status Layanan:* AKTIF\n\n`;
+      }
+    }
+
+    let tunggakanBlock = '';
+    if (remainingSummary.count > 0) {
+      tunggakanBlock = `⚠️ *SISA TUNGGAKAN LAIN:*\n` +
+        `Masih terdapat *${remainingSummary.count} tagihan* yang belum dibayar:\n` +
+        `${remainingSummary.breakdownText}\n` +
+        `💰 *Total Sisa Tunggakan:* *Rp ${remainingSummary.totalAmountStr}*\n` +
+        `_Mohon segera diselesaikan agar layanan tidak terisolir._\n\n`;
+    }
+
+    const receiptMsg = waWrap(
+      '✅ *PEMBAYARAN BERHASIL*',
+      `Terima kasih, pembayaran tagihan Anda telah kami terima:\n\n` +
+      `🧾 *No. Invoice:* #${targetInvId}\n` +
+      `👤 *Nama:* ${customerName}\n` +
+      `🆔 *ID Pelanggan:* #${custIdDisplay}\n` +
+      `📦 *Paket:* ${packageName}\n` +
+      `📅 *Periode:* ${periodStr}\n` +
+      `💰 *Total Bayar:* ${totalBayarStr}\n` +
+      `💳 *Metode:* WhatsApp Admin\n` +
+      `🕒 *Waktu:* ${nowTimeStr}\n` +
+      `📌 *Status:* *LUNAS* ✅\n\n` +
+      tunggakanBlock +
+      serviceStatusText +
+      `Terima kasih.`
+    );
+
+    logger.info(`[WA lunas] Mengirim notifikasi lunas ke ${notifyTag}...`);
+    const ok = await notifyCustomer(
+      currentSockInstance,
+      currentLidStore,
+      notifyTag,
+      receiptMsg
+    );
+
+    await reply(
+      `✅ Invoice *#${targetInvId}* (Periode: *${periodStr}* a.n *${customerName}*) berhasil ditandai LUNAS.\n` +
+      (adminReplyNote ? `${adminReplyNote}\n` : '') +
+      (remainingSummary.count > 0 ? `⚠️ Sisa tunggakan: ${remainingSummary.count} bulan (Rp ${remainingSummary.totalAmountStr})\n` : '') +
+      `📩 Notif pelanggan: ${ok ? 'terkirim' : 'gagal'}`
+    );
+  } catch (e) {
+    logger.error('[WA lunas] Gagal update status: ' + e.message);
+    await reply('❌ Gagal update status: ' + e.message);
+  }
+  return true;
+}
+
+/**
+ * Eksekusi Perintah Admin: Isolir Pelanggan
+ */
+export async function executeAdminIsolir(targetIdRaw, reply) {
+  try {
+    const keyRaw = String(targetIdRaw || '').trim();
+    if (!keyRaw) {
+      await reply('❌ Format: `isolir IDPELANGGAN` atau `isolir nama/nohp/pppoe`');
+      return true;
+    }
+    const isNumeric = /^\d+$/.test(keyRaw);
+    let cust = (isNumeric ? customerSvc.getCustomerById(Number(keyRaw)) : null) || customerSvc.findCustomerByAny(keyRaw);
+    if (!cust) {
+      const candidates = customerSvc.getAllCustomers(keyRaw) || [];
+      const unique = Array.from(new Map(candidates.map(c => [c.id, c])).values());
+      if (unique.length === 1) {
+        cust = customerSvc.getCustomerById(unique[0].id);
+      } else if (unique.length > 1) {
+        const top = unique.slice(0, 5).map(c => `- ID:${c.id} • ${c.name || '-'} • ${c.phone || '-'} • PPPoE:${c.pppoe_username || '-'}`).join('\n');
+        await reply(`⚠️ Nama/ID tidak spesifik. Ditemukan ${unique.length} pelanggan:\n\n${top}\n\nKetik spesifik: \`isolir IDPELANGGAN\``);
+        return true;
+      }
+    }
+    if (!cust) return await reply(`❌ Pelanggan *${keyRaw}* tidak ditemukan.`);
+    await customerSvc.suspendCustomer(cust.id);
+    await reply(`✅ Pelanggan *${cust.name}* (ID: ${cust.id}) berhasil di-isolir.`);
+  } catch (e) {
+    await reply('❌ Gagal isolir: ' + e.message);
+  }
+  return true;
+}
+
+/**
+ * Eksekusi Perintah Admin: Buka Isolir Pelanggan
+ */
+export async function executeAdminBuka(targetIdRaw, reply) {
+  try {
+    const keyRaw = String(targetIdRaw || '').trim();
+    if (!keyRaw) {
+      await reply('❌ Format: `buka IDPELANGGAN` atau `buka nama/nohp/pppoe`');
+      return true;
+    }
+    const isNumeric = /^\d+$/.test(keyRaw);
+    let cust = (isNumeric ? customerSvc.getCustomerById(Number(keyRaw)) : null) || customerSvc.findCustomerByAny(keyRaw);
+    if (!cust) {
+      const candidates = customerSvc.getAllCustomers(keyRaw) || [];
+      const unique = Array.from(new Map(candidates.map(c => [c.id, c])).values());
+      if (unique.length === 1) {
+        cust = customerSvc.getCustomerById(unique[0].id);
+      } else if (unique.length > 1) {
+        const top = unique.slice(0, 5).map(c => `- ID:${c.id} • ${c.name || '-'} • ${c.phone || '-'} • PPPoE:${c.pppoe_username || '-'}`).join('\n');
+        await reply(`⚠️ Nama/ID tidak spesifik. Ditemukan ${unique.length} pelanggan:\n\n${top}\n\nKetik spesifik: \`buka IDPELANGGAN\``);
+        return true;
+      }
+    }
+    if (!cust) return await reply(`❌ Pelanggan *${keyRaw}* tidak ditemukan.`);
+    await customerSvc.activateCustomer(cust.id);
+    await reply(`✅ Pelanggan *${cust.name}* (ID: ${cust.id}) berhasil diaktifkan kembali.`);
+  } catch (e) {
+    await reply('❌ Gagal buka isolir: ' + e.message);
+  }
+  return true;
+}
+
 export async function processIncomingCommand({
   senderPhone,
   text,
@@ -1508,6 +1801,26 @@ export async function processIncomingCommand({
   const adminSet = loadWhatsappAdminSet(currentLidStore);
   const isAdmin = (phone && adminSet.has(phone)) || isWhatsappAdminKey(msgKey, adminSet, currentSockInstance, currentLidStore);
   logger.info(`[WA] Sender details: JID=${(msgKey.remoteJid || phone)}, isAdmin=${isAdmin}, adminSet=${JSON.stringify([...adminSet])}`);
+// Deteksi Perintah Administratif Bahasa Alami (misal: "tolong dong lunasin pelanggan sobirin karena sudah bayar?")
+  const naturalAdminCmd = detectAdminNaturalCommand(text);
+  if (naturalAdminCmd) {
+    logger.info(`[WA Natural Admin Command] Detected: action=${naturalAdminCmd.action}, target="${naturalAdminCmd.target}", isAdmin=${isAdmin}`);
+    if (!isAdmin) {
+      logger.warn(`[WA Admin Command Rejected] Nomor bukan admin (${phone}) mencoba perintah administratif: "${text}"`);
+      await reply('❌ *Akses Ditolak*\n\nMaaf, perintah administratif (melunasi tagihan, isolir, atau buka isolir) hanya dapat dieksekusi oleh nomor Admin resmi yang terdaftar.');
+      return true;
+    }
+
+    if (naturalAdminCmd.action === 'lunas') {
+      return await executeAdminLunas(naturalAdminCmd.target, reply, currentSockInstance, currentLidStore);
+    }
+    if (naturalAdminCmd.action === 'isolir') {
+      return await executeAdminIsolir(naturalAdminCmd.target, reply);
+    }
+    if (naturalAdminCmd.action === 'buka') {
+      return await executeAdminBuka(naturalAdminCmd.target, reply);
+    }
+  }
   const parsed = parseCommand(text, isAdmin);
         logger.info(`[WA] Parsed command: ${JSON.stringify(parsed)}`);
         if (!parsed) return false;
@@ -1588,16 +1901,326 @@ export async function processIncomingCommand({
             return true;
           }
           try {
-            const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
+            let customerContext = null;
+            if (!isAdmin) {
+              customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
+            }
             const aiReply = await telegramAi.askAi({
               question: q,
-              senderName: customerContext?.customerName || senderName || 'Pelanggan',
-              customerContext
+              senderName: isAdmin ? (senderName || 'Admin') : (customerContext?.customerName || senderName || 'Pelanggan'),
+              customerContext,
+              isAdmin: Boolean(isAdmin)
             });
             await reply(aiReply);
           } catch (err) {
             logger.error('[WA AI] Error: ' + err.message);
             await reply('❌ Maaf, sedang terjadi kendala memproses jawaban AI.');
+          }
+          return true;
+        }
+
+        if (parsed.cmd === 'menu') {
+          let body = getMenuText();
+          if (isAdmin) body += '\n\n_Anda admin — ketik `admin` untuk perintah kelola semua tag._';
+          /* phone already defined */
+          const agent = phone ? agentSvc.getAgentByPhone(phone) : null;
+          if (agent) {
+            body +=
+              `\n\n📱 *MENU AGENT (@${agent.username || agent.name})*\n` +
+              '💳 `saldo` — Cek sisa saldo & komisi agent\n' +
+              '💰 `bayar <nama/nohp/id>` — Bayar tagihan pelanggan (potong saldo)\n' +
+              '🎟️ `vcr` / `vcr <paket>` — Buat voucher hotspot (potong saldo)\n' +
+              '⚡ `pulsa <SKU> <TARGET>` — Beli pulsa/produk Digiflazz\n' +
+              '🔎 `cekpulsa <TXID>` — Cek status transaksi pulsa';
+          }
+          await reply(body);
+          return true;
+        }
+
+        if (parsed.cmd === 'adminmenu') {
+          if (!isAdmin) {
+            await reply('❌ Perintah ini khusus nomor admin (pengaturan whatsapp_admin_numbers).');
+            return true;
+          }
+          await reply(getAdminMenuText());
+          return true;
+        }
+
+        if (parsed.cmd === 'listonu' && parsed.admin) {
+          if (!isAdmin) {
+            await reply('❌ Akses ditolak. Perintah ini khusus admin.');
+            return true;
+          }
+          let res = await customerDevice.listDevicesWithTags(300);
+          if (!res.ok || !res.devices || res.devices.length === 0) {
+            res = await customerDevice.listAllDevices(300);
+          }
+          if (!res.ok) {
+            await reply('❌ ' + (res.message || 'Gagal mengambil daftar.'));
+            return true;
+          }
+          const body = formatListOnu(res.devices || []);
+          const chunks = splitWaChunks(body);
+          for (const ch of chunks) {
+            await reply(ch);
+          }
+          return true;
+        }
+
+        // Admin MikroTik Logic
+        if (parsed.admin && parsed.cmd === 'mtactive') {
+          try {
+            const pppoe = await mikrotikSvc.getPppoeActive();
+            const hotspot = await mikrotikSvc.getHotspotActive();
+            await reply(formatActiveMikrotik(pppoe, hotspot));
+          } catch (e) {
+            await reply('❌ Gagal mengambil data aktif: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'kickuser') {
+          try {
+            const [user] = parsed.args;
+            const pk = await mikrotikSvc.kickPppoeUser(user);
+            const hk = await mikrotikSvc.kickHotspotUser(user);
+            if (pk || hk) await reply(`✅ Session user *${user}* berhasil diputus.`);
+            else await reply(`❌ User *${user}* tidak ditemukan di session aktif.`);
+          } catch (e) {
+            await reply('❌ Gagal kick user: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'addpppoe') {
+          try {
+            const [user, pass, profile] = parsed.args;
+            await mikrotikSvc.addPppoeSecret({ name: user, password: pass, profile, service: 'pppoe' });
+            await reply(`✅ PPPoE Secret *${user}* berhasil ditambahkan.`);
+          } catch (e) {
+            await reply('❌ Gagal tambah PPPoE: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'editpppoe') {
+          try {
+            const [user, profile] = parsed.args;
+            await mikrotikSvc.setPppoeProfile(user, profile);
+            await reply(`✅ Profile PPPoE *${user}* berhasil diubah ke *${profile}* dan session aktif telah diputus.`);
+          } catch (e) {
+            await reply('❌ Gagal edit PPPoE: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'delpppoe') {
+          try {
+            const [user] = parsed.args;
+            const secrets = await mikrotikSvc.getPppoeSecrets();
+            const found = secrets.find(s => s.name === user);
+            if (!found) return await reply(`❌ User *${user}* tidak ditemukan.`);
+            await mikrotikSvc.deletePppoeSecret(found['.id'] || found.id);
+            await mikrotikSvc.kickPppoeUser(user);
+            await reply(`✅ PPPoE Secret *${user}* berhasil dihapus dan session aktif diputus.`);
+          } catch (e) {
+            await reply('❌ Gagal hapus PPPoE: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'addhotspot') {
+          try {
+            const [user, pass, profile] = parsed.args;
+            await mikrotikSvc.addHotspotUser({ name: user, password: pass, profile });
+            await reply(`✅ Hotspot User *${user}* berhasil ditambahkan.`);
+          } catch (e) {
+            await reply('❌ Gagal tambah Hotspot: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'vcr') {
+          try {
+            const [code, profile] = parsed.args;
+            const now = getCurrentDateInTimezone();
+            const dateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+            const comment = `vc ${code} ${dateStr}`;
+
+            await mikrotikSvc.addHotspotUser({
+              name: code,
+              password: code,
+              profile: profile,
+              comment: comment
+            });
+
+            await reply(`✅ Voucher Hotspot *${code}* berhasil dibuat.\n\n👤 User: *${code}*\n🔑 Pass: *${code}*\n🏷️ Profile: *${profile}*\n📝 Comment: *${comment}*`);
+          } catch (e) {
+            await reply('❌ Gagal buat voucher: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'delhotspot') {
+          try {
+            const [user] = parsed.args;
+            const users = await mikrotikSvc.getHotspotUsers();
+            const found = users.find(u => u.name === user);
+            if (!found) return await reply(`❌ User Hotspot *${user}* tidak ditemukan.`);
+            await mikrotikSvc.deleteHotspotUser(found['.id'] || found.id);
+            await mikrotikSvc.kickHotspotUser(user);
+            await reply(`✅ Hotspot User *${user}* berhasil dihapus dan session aktif diputus.`);
+          } catch (e) {
+            await reply('❌ Gagal hapus Hotspot: ' + e.message);
+          }
+          return true;
+        }
+
+        // Admin Billing Logic
+        if (parsed.admin && parsed.cmd === 'ringkasan') {
+          const stats = billingSvc.getDashboardStats();
+          await reply(formatBillingSummary(stats));
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'lunas') {
+          return await executeAdminLunas(parsed.targetId, reply, currentSockInstance, currentLidStore);
+        }
+
+        if (parsed.admin && parsed.cmd === 'isolir') {
+          return await executeAdminIsolir(parsed.targetId, reply);
+        }
+
+        if (parsed.admin && parsed.cmd === 'buka') {
+          return await executeAdminBuka(parsed.targetId, reply);
+        }
+
+        if (parsed.admin && parsed.cmd === 'generate') {
+          try {
+            const count = billingSvc.generateMonthlyInvoices(parseInt(parsed.month), parseInt(parsed.year));
+            await reply(`✅ Berhasil generate *${count}* tagihan untuk periode ${parsed.month}/${parsed.year}.`);
+          } catch (e) {
+            await reply('❌ Gagal generate: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'digiflazz_balance') {
+          if (!isAdmin) {
+            await reply('❌ Akses ditolak. Perintah ini khusus admin.');
+            return true;
+          }
+          try {
+            const r = await agentSvc.digiflazzCheckBalance();
+            await reply(`🏦 *SALDO DIGIFLAZZ*\n\n💳 Deposit: Rp ${Number(r?.deposit || 0).toLocaleString('id-ID')}`);
+          } catch (e) {
+            await reply('❌ Gagal cek saldo Digiflazz: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.admin && parsed.cmd === 'topupagent') {
+          if (!isAdmin) {
+            await reply('❌ Akses ditolak. Perintah ini khusus admin.');
+            return true;
+          }
+          try {
+            const agentKeyRaw = String(parsed.agentKey || '').trim();
+            const amount = Number(String(parsed.amount || '').replace(/[^\d]/g, '')) || 0;
+            if (!agentKeyRaw) throw new Error('Agent username/id tidak valid');
+            if (!amount) throw new Error('Nominal tidak valid');
+
+            const normalizeDigits = (v) => {
+              let d = String(v || '').replace(/\D/g, '');
+              if (!d) return '';
+              if (d.startsWith('0')) d = '62' + d.slice(1);
+              return d;
+            };
+
+            const agentKey = agentKeyRaw.startsWith('@') ? agentKeyRaw.slice(1) : agentKeyRaw;
+            const agentKeyLc = agentKey.toLowerCase();
+            const agentDigits = normalizeDigits(agentKey);
+
+            const agents = agentSvc.getAllAgents();
+            const candidates = [];
+
+            const byId = /^\d+$/.test(agentKey) ? agents.find(a => Number(a?.id) === Number(agentKey)) : null;
+            if (byId) candidates.push(byId);
+
+            const byUsername = agents.find(a => String(a?.username || '').toLowerCase() === agentKeyLc) || null;
+            if (byUsername) candidates.push(byUsername);
+
+            if (agentDigits) {
+              const byPhone = agents.find(a => normalizeDigits(a?.phone || '') === agentDigits) || null;
+              if (byPhone) candidates.push(byPhone);
+            }
+
+            const byNameExact = agents.find(a => String(a?.name || '').trim().toLowerCase() === agentKeyLc) || null;
+            if (byNameExact) candidates.push(byNameExact);
+
+            let agent = candidates.length > 0 ? candidates[0] : null;
+            if (!agent) {
+              const byNameContains = agents.filter(a => String(a?.name || '').trim().toLowerCase().includes(agentKeyLc));
+              if (byNameContains.length === 1) agent = byNameContains[0];
+              if (!agent && byNameContains.length > 1) {
+                const list = byNameContains.slice(0, 8).map(a => `- ${a.name} (@${a.username}) [ID:${a.id}]`).join('\n');
+                throw new Error(`Nama agent lebih dari satu. Gunakan username/ID/nohp.\n\n${list}`);
+              }
+            }
+            if (!agent) throw new Error('Agent tidak ditemukan');
+
+            /* phone already defined */
+            const actorName = phone ? `Admin WA (${phone})` : 'Admin WA';
+            const note = String(parsed.note || '').trim() || 'Transfer saldo via WhatsApp';
+            const r = agentSvc.topupAgent(agent.id, amount, note, actorName);
+            await reply(
+              `✅ *TOPUP AGENT BERHASIL*\n\n` +
+              `👤 Agent: *${agent.name}* (@${agent.username})\n` +
+              `💸 Nominal: Rp ${Number(amount || 0).toLocaleString('id-ID')}\n` +
+              `💳 Saldo: Rp ${Number(r.before || 0).toLocaleString('id-ID')} ➜ Rp ${Number(r.after || 0).toLocaleString('id-ID')}\n` +
+              `📝 Catatan: ${note}`
+            );
+          } catch (e) {
+            await reply('❌ Gagal topup agent: ' + e.message);
+          }
+          return true;
+        }
+
+        if (parsed.cmd === 'agent_saldo') {
+          try {
+            const agent = phone ? agentSvc.getAgentByPhone(phone) : null;
+            if (!agent) {
+              if (isAdmin) {
+                const r = await agentSvc.digiflazzCheckBalance().catch(() => null);
+                const digiDeposit = Number(r?.deposit || 0);
+                await reply(
+                  `🏦 *SALDO DIGIFLAZZ (ADMIN)*\n\n` +
+                  `💳 Deposit: *Rp ${digiDeposit.toLocaleString('id-ID')}*\n\n` +
+                  `💡 _Nomor ini adalah Admin. Untuk cek saldo agent, daftarkan nomor ini di Menu Agent._`
+                );
+                return true;
+              }
+              await reply('❌ Nomor WhatsApp ini belum terdaftar sebagai Agent aktif.');
+              return true;
+            }
+
+            const fresh = agentSvc.getAgentById(agent.id);
+            const balance = Number(fresh?.balance || 0);
+            const fee = Number(fresh?.billing_fee || 0);
+            const { sep } = waBrand();
+
+            const msg =
+              `💳 *SALDO AGENT*\n` +
+              `${sep}\n` +
+              `👤 *Nama:* ${fresh.name} (@${fresh.username})\n` +
+              `💰 *Saldo Utama:* Rp ${balance.toLocaleString('id-ID')}\n` +
+              `🏷️ *Komisi Tagihan:* Rp ${fee.toLocaleString('id-ID')}/transaksi\n` +
+              `${sep}\n` +
+              `💡 _Untuk bayar tagihan pelanggan, ketik:_ \`bayar <nama/nohp/id>\``;
+
+            await reply(msg);
+          } catch (e) {
+            await reply('❌ Gagal cek saldo: ' + e.message);
           }
           return true;
         }

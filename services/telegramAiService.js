@@ -52,9 +52,168 @@ Fitur Utama:
 }
 
 /**
+ * Ambil status live seluruh pelanggan, MikroTik, dan GenieACS untuk Admin WhatsApp / Telegram
+ */
+async function getAdminGlobalContext(userQuestion) {
+  try {
+    const db = require('../config/database');
+    const customerDevice = require('./customerDeviceService');
+    const mikrotikService = require('./mikrotikService');
+
+    // 1. Ambil ringkasan seluruh pelanggan dari SQLite
+    const query = `
+      SELECT 
+        c.id, c.name, c.phone, c.status, c.pppoe_username, c.genieacs_tag, c.area,
+        p.name as package_name, p.price as package_price,
+        COUNT(CASE WHEN i.status != 'paid' THEN 1 END) as unpaid_count,
+        COALESCE(SUM(CASE WHEN i.status != 'paid' THEN i.amount ELSE 0 END), 0) as unpaid_amount
+      FROM customers c
+      LEFT JOIN packages p ON c.package_id = p.id
+      LEFT JOIN invoices i ON c.id = i.customer_id
+      GROUP BY c.id
+      ORDER BY c.id ASC
+    `;
+    const customers = db.prepare(query).all();
+
+    const total = customers.length;
+    const active = customers.filter(c => (c.status || '').toLowerCase() === 'active').length;
+    const isolated = customers.filter(c => ['isolated', 'suspended', 'isolir'].includes((c.status || '').toLowerCase())).length;
+    const inactive = customers.filter(c => ['inactive', 'nonaktif', 'terminated'].includes((c.status || '').toLowerCase())).length;
+    const unpaidCustomers = customers.filter(c => c.unpaid_count > 0);
+    const totalUnpaidAmount = unpaidCustomers.reduce((acc, c) => acc + (c.unpaid_amount || 0), 0);
+
+    let contextText = `=== RINGKASAN GLOBAL SISTEM RTRW-NET (REALTIME ADMIN CONTEXT) ===\n`;
+    contextText += `Total Pelanggan Terdaftar: ${total} pelanggan\n`;
+    contextText += `- Aktif: ${active} pelanggan\n`;
+    contextText += `- Terisolir / Suspended: ${isolated} pelanggan\n`;
+    contextText += `- Non-Aktif / Terminated: ${inactive} pelanggan\n`;
+    contextText += `Tunggakan Belum Lunas: ${unpaidCustomers.length} pelanggan (Total Tunggakan: Rp ${totalUnpaidAmount.toLocaleString('id-ID')})\n\n`;
+
+    // 2. Direktori ringkas seluruh pelanggan
+    contextText += `=== DIREKTORI SELURUH PELANGGAN (ID | Nama | No HP | Status | PPPoE | Paket | Tunggakan) ===\n`;
+    for (const c of customers) {
+      const unpaidStr = c.unpaid_count > 0 ? `${c.unpaid_count} tagihan (Rp ${c.unpaid_amount.toLocaleString('id-ID')})` : 'Lunas';
+      contextText += `[ID:${c.id}] ${c.name} | ${c.phone || '-'} | Status: ${c.status} | PPPoE: ${c.pppoe_username || '-'} | Pkt: ${c.package_name || '-'} | Tunggakan: ${unpaidStr}\n`;
+    }
+    contextText += `\n`;
+
+    // 3. Deteksi apakah admin menanyakan pelanggan tertentu
+    const qLower = String(userQuestion || '').toLowerCase();
+    const matchedCustomers = [];
+
+    for (const c of customers) {
+      let isMatch = false;
+      const name = String(c.name || '').toLowerCase().trim();
+      const pppoe = String(c.pppoe_username || '').toLowerCase().trim();
+      const phoneDigits = String(c.phone || '').replace(/\D/g, '');
+      const tag = String(c.genieacs_tag || '').toLowerCase().trim();
+      const idStr = String(c.id);
+
+      // Cek ID
+      if (new RegExp(`\\b(id|#)\\s*${idStr}\\b`, 'i').test(qLower)) {
+        isMatch = true;
+      }
+      // Cek No HP
+      else if (phoneDigits.length >= 8 && qLower.includes(phoneDigits.slice(-8))) {
+        isMatch = true;
+      }
+      // Cek PPPoE username
+      else if (pppoe.length >= 3 && qLower.includes(pppoe)) {
+        isMatch = true;
+      }
+      // Cek GenieACS Tag
+      else if (tag.length >= 3 && qLower.includes(tag)) {
+        isMatch = true;
+      }
+      // Cek Nama Pelanggan
+      else if (name.length >= 3) {
+        if (qLower.includes(name)) {
+          isMatch = true;
+        } else {
+          const words = name.split(/\s+/).filter(w => w.length >= 4);
+          for (const w of words) {
+            if (['bisa', 'tolong', 'admin', 'saya', 'yang', 'dari', 'untuk', 'paket', 'status', 'kabel', 'modem', 'wifi', 'cek'].includes(w)) continue;
+            if (qLower.includes(w)) {
+              isMatch = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (isMatch) {
+        matchedCustomers.push(c);
+        if (matchedCustomers.length >= 3) break;
+      }
+    }
+
+    // 4. Jika ada pelanggan yang cocok, lakukan Deep Dive (Invoices + GenieACS + MikroTik)
+    if (matchedCustomers.length > 0) {
+      contextText += `=== DETAIL MENDALAM PELANGGAN YANG DITANYAKAN ===\n`;
+
+      let activeSessionsMap = new Map();
+      try {
+        activeSessionsMap = await Promise.race([
+          mikrotikService.getActivePppoeSessionsMap(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('MikroTik timeout')), 4000))
+        ]).catch(() => new Map());
+      } catch (_) {}
+
+      for (const mc of matchedCustomers) {
+        const invRows = db.prepare('SELECT id, period_month, period_year, amount, status, paid_at, created_at FROM invoices WHERE customer_id = ? ORDER BY id DESC LIMIT 5').all(mc.id);
+        const unpaidInvs = invRows.filter(i => i.status !== 'paid');
+        const paidInvs = invRows.filter(i => i.status === 'paid');
+
+        let onuData = null;
+        const lookupTag = mc.genieacs_tag || mc.pppoe_username || mc.phone;
+        if (lookupTag) {
+          try {
+            onuData = await Promise.race([
+              customerDevice.getCustomerDeviceData(lookupTag),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('GenieACS timeout')), 4000))
+            ]).catch(() => null);
+          } catch (_) {}
+        }
+
+        const pppoeUser = (mc.pppoe_username || '').toLowerCase();
+        const pppoeSession = pppoeUser ? activeSessionsMap.get(pppoeUser) : null;
+
+        contextText += `\n>> PELANGGAN: ${mc.name} (ID: ${mc.id})\n`;
+        contextText += `  - No HP: ${mc.phone || '-'}\n`;
+        contextText += `  - Status Billing: ${mc.status}\n`;
+        contextText += `  - Area: ${mc.area || '-'}\n`;
+        contextText += `  - Paket: ${mc.package_name || '-'} (Rp ${Number(mc.package_price || 0).toLocaleString('id-ID')}/bulan)\n`;
+        contextText += `  - Akun PPPoE: ${mc.pppoe_username || '-'}\n`;
+        contextText += `  - Status PPPoE MikroTik: ${pppoeSession ? `ONLINE (IP: ${pppoeSession.ip}, Uptime: ${pppoeSession.uptime}, Router: ${pppoeSession.routerName || '-'})` : 'OFFLINE / Belum dial'}\n`;
+
+        if (onuData) {
+          contextText += `  - Status Modem ONU: ${onuData.status || 'Unknown'}\n`;
+          contextText += `  - Redaman Optical (RX Power): ${onuData.rxPower ? onuData.rxPower + ' dBm' : '-'}\n`;
+          contextText += `  - Nama WiFi (SSID): ${onuData.ssid || '-'}\n`;
+          contextText += `  - ONU Uptime: ${onuData.uptime || '-'}\n`;
+          contextText += `  - Pengguna WiFi Terhubung: ${onuData.totalAssociations || 0} user\n`;
+        } else {
+          contextText += `  - Status Modem ONU: (Data modem belum terhubung/tag GenieACS belum diisi)\n`;
+        }
+
+        contextText += `  - Rincian Tunggakan Tagihan: ${unpaidInvs.length > 0 ? unpaidInvs.map(i => `#${i.id} (Periode ${i.period_month}/${i.period_year}: Rp ${Number(i.amount).toLocaleString('id-ID')})`).join(', ') : 'TIDAK ADA (Semua tagihan LUNAS)'}\n`;
+        if (paidInvs.length > 0) {
+          contextText += `  - Tagihan Terakhir Lunas: #${paidInvs[0].id} (Periode ${paidInvs[0].period_month}/${paidInvs[0].period_year} sebesar Rp ${Number(paidInvs[0].amount).toLocaleString('id-ID')} pada ${paidInvs[0].paid_at || '-'})\n`;
+        }
+      }
+    }
+
+    return contextText;
+  } catch (err) {
+    logger.error(`[TelegramAI] Gagal mengambil admin global context: ${err.message}`);
+    return '';
+  }
+}
+
+/**
  * Panggil Google Gemini API
  */
-async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', customerContext = null) {
+async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', customerContext = null, isAdmin = false, adminContext = null) {
   const knowledge = loadKnowledgeBase();
   const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.7-flash', 'gemini-3.8-flash'];
   const preferredModel = getSetting('gemini_model', 'gemini-3.5-flash-lite');
@@ -62,9 +221,27 @@ async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', custom
   // Prioritaskan model pilihan user
   const modelList = [preferredModel, ...models.filter(m => m !== preferredModel)];
 
-  let liveCustomerDataPrompt = '';
-  if (customerContext) {
-    liveCustomerDataPrompt = `
+  let systemInstruction = '';
+  if (isAdmin) {
+    systemInstruction = `Anda adalah "Asisten AI Eksekutif & Administrator Jaringan RTRW-Net", asisten cerdas yang berdedikasi mendampingi Pemilik / Administrator Jaringan WhatsApp "RTRWNET Management & Billing System" (Botlokal).
+
+Pedoman Jawaban untuk Admin:
+1. AKURAT & KOMPREHENSIF: Anda memiliki akses ke data operasional live server billing, MikroTik, dan GenieACS di bawah ini. Jawablah setiap pertanyaan admin mengenai status pelanggan, tagihan, isolir, router, atau modem berdasarkan data live tersebut secara presisi.
+2. PERTANYAAN KHUSUS PELANGGAN: Jika admin menanyakan pelanggan tertentu (misal: "apakah diva nunggak?", "cek redaman diva", "siapa yang terisolir?", "kenapa pelanggan X putus?"), sebutkan data lengkapnya (status billing, tunggakan, modem/redaman, pppoe) secara profesional dan to the point.
+3. PERTANYAAN GLOBAL / OPERASIONAL: Jika admin menanyakan ringkasan (misal: "berapa pelanggan yang isolir?", "siapa saja yang belum bayar?", "total uang tunggakan?"), rangkum dengan angka pasti dan sebutkan nama-nama pelanggan yang bersangkutan secara rapi.
+4. PERTANYAAN SISTEM & TEKNIS: Jika admin menanyakan fitur aplikasi atau konfigurasi teknis MikroTik/GenieACS/OLT/Radius, rujuk ke DOKUMENTASI SISTEM di bawah.
+5. Gaya Bahasa: Bahasa Indonesia yang lugas, profesional, santun, dan efisien untuk admin/network engineer. Gunakan bullet points dan bold formatting untuk kemudahan membaca di WhatsApp.
+
+DATA OPERASIONAL LIVE (ADMIN ACCESS):
+${adminContext || '(Tidak ada data kontekstual khusus)'}
+
+DOKUMENTASI SISTEM (Untuk pertanyaan fitur aplikasi):
+${knowledge}
+`;
+  } else {
+    let liveCustomerDataPrompt = '';
+    if (customerContext) {
+      liveCustomerDataPrompt = `
 ----------------------------------------
 DATA STATUS LIVE PELANGGAN (Dari Database Server Billing):
 - Nama Pelanggan: ${customerContext.customerName || senderName}
@@ -78,9 +255,9 @@ PETUNJUK KHUSUS JIKA MENANYAKAN TAGIHAN / TUNGGAKAN / PEMBAYARAN:
 Jika pelanggan bertanya mengenai sisa tagihan, status pembayaran, jumlah uang yang harus dibayar, atau tunggakan miliknya, gunakan DATA STATUS LIVE di atas! Sebutkan nama pelanggan, total tagihan yang belum lunas beserta rincian periode bulannya secara sopan, jelas, dan ramah. Jika semua tagihan sudah lunas, beritahukan bahwa tagihan sudah lunas dan ucapkan terima kasih.
 ----------------------------------------
 `;
-  }
+    }
 
-  const systemInstruction = `Anda adalah "Asisten AI Komunitas & Layanan Pelanggan RTRW-Net", asisten cerdas yang ramah dan membantu untuk grup diskusi dan layanan pelanggan WhatsApp "RTRWNET Management & Billing System" (Botlokal).
+    systemInstruction = `Anda adalah "Asisten AI Komunitas & Layanan Pelanggan RTRW-Net", asisten cerdas yang ramah dan membantu untuk grup diskusi dan layanan pelanggan WhatsApp "RTRWNET Management & Billing System" (Botlokal).
 
 Pedoman Jawaban:
 1. TERKAIT APLIKASI & LAYANAN: Jika pertanyaan berkaitan dengan aplikasi RTRWNET / Botlokal (seperti Billing, MikroTik, GenieACS TR-069, OLT SNMP, Payment Gateway, WhatsApp Baileys, Portal Pelanggan, Voucher, isolir, dll.), jawablah secara mendalam, akurat, dan mengacu pada DOKUMENTASI SISTEM di bawah ini.
@@ -95,6 +272,7 @@ ${liveCustomerDataPrompt}
 DOKUMENTASI SISTEM (Khusus untuk pertanyaan seputar fitur aplikasi):
 ${knowledge}
 `;
+  }
 
   let lastError = null;
 
@@ -153,10 +331,86 @@ ${knowledge}
 }
 
 /**
- * Fallback Jawaban Cerdas berbasis Kata Kunci jika belum ada Gemini API Key
+ * Fallback Jawaban Cerdas berbasis Kata Kunci jika belum ada Gemini API Key atau offline
  */
-function getOfflineAnswer(question, customerContext = null) {
+function getOfflineAnswer(question, customerContext = null, isAdmin = false, adminContext = null) {
   const q = String(question || '').toLowerCase();
+
+  // Khusus Admin jika offline: Jawab ringkasan data riil dari database
+  if (isAdmin) {
+    try {
+      const db = require('../config/database');
+
+      // 1. Cek pertanyaan tunggakan / tagihan belum lunas
+      if (q.includes('tunggak') || q.includes('belum bayar') || q.includes('tagihan') || q.includes('piutang') || q.includes('nunggak')) {
+        const unpaidList = db.prepare(`
+          SELECT c.id, c.name, c.phone, c.status, COUNT(i.id) as count, SUM(i.amount) as total
+          FROM customers c
+          JOIN invoices i ON c.id = i.customer_id
+          WHERE i.status != 'paid'
+          GROUP BY c.id
+          ORDER BY total DESC
+        `).all();
+
+        if (unpaidList.length === 0) {
+          return `🎉 *Laporan Billing Admin (Offline)*\n\nAlhamdulillah, saat ini *tidak ada pelanggan yang menunggak*. Semua tagihan sudah lunas!`;
+        }
+
+        const totalNominal = unpaidList.reduce((sum, item) => sum + Number(item.total || 0), 0);
+        let resp = `📊 *LAPORAN TUNGGAKAN PELANGGAN (OFFLINE)*\n\n`;
+        resp += `• Total Penunggak: *${unpaidList.length} pelanggan*\n`;
+        resp += `• Total Nominal: *Rp ${totalNominal.toLocaleString('id-ID')}*\n\n`;
+        resp += `*Daftar Pelanggan Menunggak:*\n`;
+        unpaidList.slice(0, 15).forEach((c, idx) => {
+          resp += `${idx + 1}. *${c.name}* (${c.phone || '-'}) - Rp ${Number(c.total).toLocaleString('id-ID')} [${c.count} tagihan]\n`;
+        });
+        if (unpaidList.length > 15) {
+          resp += `\n_...dan ${unpaidList.length - 15} pelanggan lainnya._`;
+        }
+        return resp;
+      }
+
+      // 2. Cek pertanyaan isolir / terisolir / putus
+      if (q.includes('isolir') || q.includes('suspend') || q.includes('putus')) {
+        const isolatedList = db.prepare(`
+          SELECT id, name, phone, pppoe_username, area
+          FROM customers
+          WHERE LOWER(status) IN ('isolated', 'suspended', 'isolir')
+          ORDER BY id ASC
+        `).all();
+
+        if (isolatedList.length === 0) {
+          return `✅ *Laporan Status Isolir (Offline)*\n\nSaat ini *tidak ada pelanggan yang sedang terisolir*. Semua pelanggan dalam status aktif/normal.`;
+        }
+
+        let resp = `🔒 *DAFTAR PELANGGAN TERISOLIR (Total: ${isolatedList.length})*\n\n`;
+        isolatedList.forEach((c, idx) => {
+          resp += `${idx + 1}. *${c.name}* | PPPoE: \`${c.pppoe_username || '-'}\` | Area: ${c.area || '-'}\n`;
+        });
+        return resp;
+      }
+
+      // 3. Cek total / ringkasan / rekap
+      if (q.includes('total') || q.includes('berapa') || q.includes('rekap') || q.includes('ringkasan')) {
+        const stats = db.prepare(`
+          SELECT 
+            COUNT(*) as total,
+            COUNT(CASE WHEN LOWER(status) = 'active' THEN 1 END) as active,
+            COUNT(CASE WHEN LOWER(status) IN ('isolated', 'suspended', 'isolir') THEN 1 END) as isolated,
+            COUNT(CASE WHEN LOWER(status) IN ('inactive', 'terminated', 'nonaktif') THEN 1 END) as inactive
+          FROM customers
+        `).get();
+
+        return `📊 *RINGKASAN PELANGGAN (OFFLINE)*\n\n` +
+          `• Total Terdaftar: *${stats.total} pelanggan*\n` +
+          `• Aktif: *${stats.active} pelanggan*\n` +
+          `• Terisolir: *${stats.isolated} pelanggan*\n` +
+          `• Nonaktif: *${stats.inactive} pelanggan*`;
+      }
+    } catch (err) {
+      logger.error(`[TelegramAI] Offline admin answer error: ${err.message}`);
+    }
+  }
 
   // Jika pelanggan menanyakan tagihan/tunggakan dan ada data live pelanggan
   if (customerContext && (q.includes('tagihan') || q.includes('tunggak') || q.includes('bayar') || q.includes('lunas') || q.includes('tempo') || q.includes('invoice'))) {
@@ -252,27 +506,36 @@ function getOfflineAnswer(question, customerContext = null) {
 /**
  * Handle tanya jawab AI utama
  */
-async function askAi({ question, senderName, customerContext = null }) {
+async function askAi({ question, senderName, customerContext = null, isAdmin = false }) {
   const cleanQ = String(question || '').trim();
   if (!cleanQ) {
     return 'Silakan ajukan pertanyaan seputar fitur aplikasi atau layanan internet Anda.';
+  }
+
+  let adminContext = null;
+  if (isAdmin) {
+    try {
+      adminContext = await getAdminGlobalContext(cleanQ);
+    } catch (err) {
+      logger.error(`[TelegramAI] Gagal build admin context: ${err.message}`);
+    }
   }
 
   const apiKey = getSetting('gemini_api_key', '');
   
   if (apiKey && apiKey.trim()) {
     try {
-      const aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName, customerContext);
+      const aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName, customerContext, isAdmin, adminContext);
       return aiReply;
     } catch (err) {
       logger.error(`[TelegramAI] Gagal call Gemini API: ${err.message}. Menggunakan fallback jawaban lokal.`);
       // Jika AI error, fallback ke jawaban offline
-      return getOfflineAnswer(cleanQ, customerContext);
+      return getOfflineAnswer(cleanQ, customerContext, isAdmin, adminContext);
     }
   }
 
   // Jika API key belum diatur, gunakan offline knowledge base
-  return getOfflineAnswer(cleanQ, customerContext);
+  return getOfflineAnswer(cleanQ, customerContext, isAdmin, adminContext);
 }
 
 /**
@@ -334,5 +597,6 @@ module.exports = {
   askAi,
   checkDns,
   checkPing,
-  getOfflineAnswer
+  getOfflineAnswer,
+  getAdminGlobalContext
 };
