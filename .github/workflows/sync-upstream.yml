@@ -1,0 +1,70 @@
+
+name: Sync Billing RT RW Upstream
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-billing-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream main to fork main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream \
+            https://github.com/alijayanet/billing-rtrw.git
+          git fetch upstream main
+
+      - name: Check upstream changes
+        id: check
+        shell: bash
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "Fork sudah mengikuti upstream."
+          elif git merge-base --is-ancestor HEAD upstream/main; then
+            echo "status=update" >> "$GITHUB_OUTPUT"
+            echo "Update upstream dapat diterapkan dengan fast-forward."
+          else
+            echo "::error::Riwayat fork dan upstream bercabang."
+            echo "Sinkronisasi dihentikan demi keamanan."
+            exit 1
+          fi
+
+      - name: Apply upstream update
+        if: steps.check.outputs.status == 'update'
+        run: |
+          git merge --ff-only upstream/main
+
+      - name: Push to fork
+        if: steps.check.outputs.status == 'update'
+        run: |
+          git push origin HEAD:main
+
+      - name: Report status
+        if: success()
+        run: |
+          echo "Sinkronisasi selesai."
+          git log -1 --format="Commit fork: %h - %s"
