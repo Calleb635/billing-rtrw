@@ -1,0 +1,17 @@
+.git
+.github
+node_modules
+.env
+.env.*
+!.env.example
+settings.json
+config/settings.json
+database.sqlite
+database/billing.db
+database/billing.db-*
+*.log
+logs/
+backups/
+auth_info_baileys/
+uploads/
+public/uploads/
