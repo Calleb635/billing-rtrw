@@ -3,6 +3,7 @@ const path = require('path');
 const axios = require('axios');
 const { getSetting } = require('../config/settingsManager');
 const { logger } = require('../config/logger');
+const { adminToolDeclarations, executeAdminTool } = require('./adminAiTools');
 
 // Cache untuk dokumen knowledge base
 let cachedKnowledge = null;
@@ -225,12 +226,16 @@ async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', custom
   if (isAdmin) {
     systemInstruction = `Anda adalah "Asisten AI Eksekutif & Administrator Jaringan RTRW-Net", asisten cerdas yang berdedikasi mendampingi Pemilik / Administrator Jaringan WhatsApp "RTRWNET Management & Billing System" (Botlokal).
 
-Pedoman Jawaban untuk Admin:
+Pedoman Jawaban dan Eksekusi untuk Admin:
 1. AKURAT & KOMPREHENSIF: Anda memiliki akses ke data operasional live server billing, MikroTik, dan GenieACS di bawah ini. Jawablah setiap pertanyaan admin mengenai status pelanggan, tagihan, isolir, router, atau modem berdasarkan data live tersebut secara presisi.
 2. PERTANYAAN KHUSUS PELANGGAN: Jika admin menanyakan pelanggan tertentu (misal: "apakah diva nunggak?", "cek redaman diva", "siapa yang terisolir?", "kenapa pelanggan X putus?"), sebutkan data lengkapnya (status billing, tunggakan, modem/redaman, pppoe) secara profesional dan to the point.
 3. PERTANYAAN GLOBAL / OPERASIONAL: Jika admin menanyakan ringkasan (misal: "berapa pelanggan yang isolir?", "siapa saja yang belum bayar?", "total uang tunggakan?"), rangkum dengan angka pasti dan sebutkan nama-nama pelanggan yang bersangkutan secara rapi.
 4. PERTANYAAN SISTEM & TEKNIS: Jika admin menanyakan fitur aplikasi atau konfigurasi teknis MikroTik/GenieACS/OLT/Radius, rujuk ke DOKUMENTASI SISTEM di bawah.
-5. Gaya Bahasa: Bahasa Indonesia yang lugas, profesional, santun, dan efisien untuk admin/network engineer. Gunakan bullet points dan bold formatting untuk kemudahan membaca di WhatsApp.
+5. EKSEKUSI PERINTAH ADMINISTRATIF VIA TOOLS: Anda DILENGKAPI DENGAN FUNCTION TOOLS untuk mengeksekusi aksi administratif. Jika pesan admin mengandung instruksi / perintah tindakan (misal: tambah pelanggan, hapus pelanggan, reboot/restart modem ONU, ganti password/SSID WiFi, lunasi tagihan, isolir, buka isolir, kick user aktif, buat voucher hotspot, generate invoice bulanan, cek saldo digiflazz, atau top up agent), PANGGIL FUNCTION TOOL YANG SESUAI dengan parameter yang diekstrak dari percakapan.
+- Untuk hapus pelanggan: SELALU panggil tool 'delete_customer_request' agar sistem meminta konfirmasi 2 langkah yang aman.
+- Untuk tambah pelanggan: Panggil 'add_customer' dengan mengekstrak nama, nomor telepon WhatsApp, paket (jika ada), area, alamat, dan username/password PPPoE (jika ditentukan).
+- Jika admin HANYA bertanya informasi tanpa memerintahkan perubahan data/eksekusi aksi, JANGAN panggil tool pengubah data, melainkan berikan jawaban teks langsung menggunakan DATA OPERASIONAL LIVE di bawah.
+6. Gaya Bahasa: Bahasa Indonesia yang lugas, profesional, santun, dan efisien untuk admin/network engineer. Gunakan bullet points dan bold formatting untuk kemudahan membaca di WhatsApp.
 
 DATA OPERASIONAL LIVE (ADMIN ACCESS):
 ${adminContext || '(Tidak ada data kontekstual khusus)'}
@@ -285,26 +290,52 @@ ${knowledge}
             role: 'user',
             parts: [
               {
-                text: `${systemInstruction}\n\nPertanyaan dari ${senderName}:\n${userQuestion}`
+                text: `${systemInstruction}\n\nPertanyaan / Instruksi dari Admin (${senderName}):\n${userQuestion}`
               }
             ]
           }
         ],
         generationConfig: {
-          temperature: 0.3,
+          temperature: 0.2,
           maxOutputTokens: 1024
         }
       };
 
+      if (isAdmin && Array.isArray(adminToolDeclarations) && adminToolDeclarations.length > 0) {
+        payload.tools = [
+          {
+            functionDeclarations: adminToolDeclarations
+          }
+        ];
+      }
+
       const response = await axios.post(url, payload, {
         headers: { 'Content-Type': 'application/json' },
-        timeout: 20000
+        timeout: 25000
       });
 
       const candidate = response.data?.candidates?.[0];
-      const answer = candidate?.content?.parts?.[0]?.text;
-      if (answer && answer.trim()) {
-        return answer.trim();
+      const parts = candidate?.content?.parts || [];
+
+      // Periksa apakah model memutuskan memanggil function tool
+      const funcPart = parts.find(p => p.functionCall);
+      if (funcPart && funcPart.functionCall) {
+        return {
+          type: 'function_call',
+          functionCall: {
+            name: funcPart.functionCall.name,
+            args: funcPart.functionCall.args || {}
+          }
+        };
+      }
+
+      // Jawaban teks biasa
+      const textPart = parts.find(p => p.text && p.text.trim());
+      if (textPart && textPart.text) {
+        return {
+          type: 'text',
+          text: textPart.text.trim()
+        };
       }
     } catch (err) {
       lastError = err;
@@ -506,7 +537,7 @@ function getOfflineAnswer(question, customerContext = null, isAdmin = false, adm
 /**
  * Handle tanya jawab AI utama
  */
-async function askAi({ question, senderName, customerContext = null, isAdmin = false }) {
+async function askAi({ question, senderName, customerContext = null, isAdmin = false, extraContext = {} }) {
   const cleanQ = String(question || '').trim();
   if (!cleanQ) {
     return 'Silakan ajukan pertanyaan seputar fitur aplikasi atau layanan internet Anda.';
@@ -526,7 +557,14 @@ async function askAi({ question, senderName, customerContext = null, isAdmin = f
   if (apiKey && apiKey.trim()) {
     try {
       const aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName, customerContext, isAdmin, adminContext);
-      return aiReply;
+      if (typeof aiReply === 'object' && aiReply?.type === 'function_call') {
+        const toolResult = await executeAdminTool(aiReply.functionCall.name, aiReply.functionCall.args, extraContext);
+        return toolResult;
+      }
+      if (typeof aiReply === 'object' && aiReply?.type === 'text') {
+        return aiReply.text;
+      }
+      return typeof aiReply === 'string' ? aiReply : (aiReply?.text || JSON.stringify(aiReply));
     } catch (err) {
       logger.error(`[TelegramAI] Gagal call Gemini API: ${err.message}. Menggunakan fallback jawaban lokal.`);
       // Jika AI error, fallback ke jawaban offline

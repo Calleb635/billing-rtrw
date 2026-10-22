@@ -753,6 +753,10 @@ function parseCommand(text, isAdmin) {
   }
 
   // Admin Billing & Pelanggan
+  if (isAdmin && /^ya\s+hapus\s+(\d+)[.!]?$/i.test(t)) {
+    const match = t.match(/^ya\s+hapus\s+(\d+)[.!]?$/i);
+    return { cmd: 'confirm_delete_customer', customerId: parseInt(match[1], 10), admin: true };
+  }
   if (isAdmin && cmd === 'ringkasan') return { cmd: 'ringkasan', admin: true };
   if (isAdmin && cmd === 'lunas' && parts.length >= 2) return { cmd: 'lunas', admin: true, targetId: rest || parts.slice(1).join(' ') };
   if (isAdmin && cmd === 'generate' && parts.length >= 3) return { cmd: 'generate', admin: true, month: parts[1], year: parts[2] };
@@ -1909,12 +1913,34 @@ export async function processIncomingCommand({
               question: q,
               senderName: isAdmin ? (senderName || 'Admin') : (customerContext?.customerName || senderName || 'Pelanggan'),
               customerContext,
-              isAdmin: Boolean(isAdmin)
+              isAdmin: Boolean(isAdmin),
+              extraContext: { reply, sock: currentSockInstance, lidStore: currentLidStore, phone }
             });
             await reply(aiReply);
           } catch (err) {
             logger.error('[WA AI] Error: ' + err.message);
             await reply('❌ Maaf, sedang terjadi kendala memproses jawaban AI.');
+          }
+          return true;
+        }
+
+        if (parsed.cmd === 'confirm_delete_customer' && parsed.admin) {
+          if (!isAdmin) {
+            await reply('❌ Perintah ini khusus nomor admin.');
+            return true;
+          }
+          const custId = parsed.customerId;
+          const cust = customerSvc.getCustomerById(custId);
+          if (!cust) {
+            await reply(`❌ Pelanggan dengan ID #${custId} tidak ditemukan atau sudah dihapus.`);
+            return true;
+          }
+          try {
+            await customerSvc.deleteCustomer(custId);
+            await reply(`🗑️ *PELANGGAN BERHASIL DIHAPUS*\n\nData pelanggan *${cust.name}* (ID: #${custId}, No HP: ${cust.phone || '-'}) telah dihapus dari sistem billing.`);
+          } catch (err) {
+            logger.error(`[WA Bot] Gagal menghapus pelanggan #${custId}: ${err.message}`);
+            await reply(`❌ Gagal menghapus pelanggan #${custId}: ${err.message}`);
           }
           return true;
         }
