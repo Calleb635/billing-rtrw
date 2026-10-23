@@ -895,13 +895,14 @@ async function updateSSID(tag, newSSID, actor = null) {
       if (wlan['1']) {
         parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID', newSSID, 'xsd:string']);
       }
-      const fiveGIndex = wlan['5'] ? '5' : (wlan['2'] ? '2' : null);
+      // Hanya kirim 5G SSID jika parameter SSID 5G benar-benar ada di pohon data perangkat
+      const fiveGIndex = (wlan['5'] && wlan['5'].SSID !== undefined) ? '5' : ((wlan['2'] && wlan['2'].SSID !== undefined) ? '2' : null);
       if (fiveGIndex) {
         parameterValues.push([`InternetGatewayDevice.LANDevice.1.WLANConfiguration.${fiveGIndex}.SSID`, `${newSSID}-5G`, 'xsd:string']);
       }
     } else if (dev181 && dev181.WiFi) {
       parameterValues.push(['Device.WiFi.SSID.1.SSID', newSSID, 'xsd:string']);
-      if (dev181.WiFi.SSID && dev181.WiFi.SSID['2']) {
+      if (dev181.WiFi.SSID && dev181.WiFi.SSID['2'] && dev181.WiFi.SSID['2'].SSID !== undefined) {
         parameterValues.push(['Device.WiFi.SSID.2.SSID', `${newSSID}-5G`, 'xsd:string']);
       }
     } else {
@@ -922,32 +923,25 @@ async function updateSSID(tag, newSSID, actor = null) {
     }
 
     let ok = false;
-    try {
-      await instance.post(tasksUrl, {
-        name: 'setParameterValues',
-        parameterValues: parameterValues
-      }, { timeout: 20000 });
-      ok = true;
-    } catch (e) {
-      logger.error(`[updateSSID] Failed to set SSID: ${e.message}`);
+    for (const pv of parameterValues) {
+      try {
+        await instance.post(tasksUrl, {
+          name: 'setParameterValues',
+          parameterValues: [pv]
+        }, { timeout: 15000 });
+        ok = true;
+      } catch (e) {
+        logger.error(`[updateSSID] Failed to set parameter ${pv[0]}: ${e.message}`);
+      }
     }
 
-    // Refresh objects untuk trigger inform dari ONU
+    // Refresh objects untuk trigger update parameter dari ONU
     try {
       await instance.post(tasksUrl, { name: 'refreshObject', objectName: 'InternetGatewayDevice.LANDevice.1.WLANConfiguration' }, { timeout: 15000 });
     } catch (e) {}
-    // Skip Device.WiFi.SSID refresh karena tidak semua ONU support (CIOT tidak support)
 
-    // Trigger inform untuk force ONU komunikasi dengan ACS
+    // Tunggu sesaat agar task dieksekusi oleh ONU
     if (ok) {
-      try {
-        await instance.post(tasksUrl, { name: 'inform' }, { timeout: 15000 });
-        logger.info(`[updateSSID] Inform task triggered untuk ${tag}`);
-      } catch (e) {
-        logger.warn(`[updateSSID] Failed to trigger inform: ${e.message}`);
-      }
-      
-      // Wait untuk ACS mendapat data terbaru dari ONU (jangan terlalu lama, cukup 3 detik)
       await new Promise(resolve => setTimeout(resolve, 3000));
     }
 
@@ -1019,7 +1013,7 @@ async function updatePassword(tag, newPassword, actor = null) {
       }
 
       // 5G if available
-      const fiveGIndex = wlan['5'] ? '5' : (wlan['2'] ? '2' : null);
+      const fiveGIndex = (wlan['5'] && (wlan['5'].SSID !== undefined || wlan['5'].KeyPassphrase !== undefined)) ? '5' : ((wlan['2'] && (wlan['2'].SSID !== undefined || wlan['2'].KeyPassphrase !== undefined)) ? '2' : null);
       if (fiveGIndex) {
         const wlan5 = wlan[fiveGIndex] || {};
         if (wlan5.KeyPassphrase !== undefined) {
