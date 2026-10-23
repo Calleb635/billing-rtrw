@@ -55,7 +55,29 @@
                 <div class="card-header"><i class="bi bi-diagram-3"></i> Network Info</div>
                 <div class="info-row"><span>PPPoE User</span><span><%= device.pppoeUsername || device.pppoeUser || '-' %></span></div>
                 <div class="info-row"><span>IP Address</span><code><%= device.pppoeIP || device.ip || '-' %></code></div>
-                <div class="info-row"><span>RX Power</span><span class="badge" style="background:var(--primary); color:white;"><%= device.rxPower || '-' %> dBm</span></div>
+                <div class="info-row">
+                    <span>RX Power</span>
+                    <% 
+                      let rxVal = device.rxPower || device.rx_power || '-';
+                      let rxNum = parseFloat(rxVal);
+                      let isLos = (rxVal === 'LOS' || rxVal === '0' || rxVal === '0.00');
+                      let bg = 'var(--primary)';
+                      if (isLos) {
+                        bg = '#ef4444';
+                      } else if (!isNaN(rxNum)) {
+                        if (rxNum >= -24 && rxNum <= -13) bg = '#10b981';
+                        else if (rxNum < -24 && rxNum >= -27) bg = '#f59e0b';
+                        else bg = '#ef4444';
+                      }
+                    %>
+                    <% if (isLos) { %>
+                        <span class="badge" style="background:#ef4444; color:white;">LOS (No Signal)</span>
+                    <% } else if (rxVal && rxVal !== '-') { %>
+                        <span class="badge" style="background:<%= bg %>; color:white;"><%= rxVal %> dBm</span>
+                    <% } else { %>
+                        <span class="text-muted">-</span>
+                    <% } %>
+                </div>
                 <div class="info-row"><span>SSID</span><span><%= device.ssid || '-' %></span></div>
                 <div class="info-row"><span>Uptime</span><span><%= device.uptime || '-' %></span></div>
                 <div class="info-row"><span>PPPoE Uptime</span><span><%= device.pppoeUptime || '-' %></span></div>

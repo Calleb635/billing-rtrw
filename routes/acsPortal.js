@@ -639,20 +639,23 @@ function extractPppoeUptime(d) {
 
 function formatRxPower(val) {
     if (val === undefined || val === null || val === '-' || val === '' || val === 'N/A') return '-';
-    const num = parseFloat(val);
-    if (isNaN(num)) return String(val);
-    // Jika sudah berupa angka dBm negatif (seperti -17.19)
-    if (num < 0) return num.toFixed(2);
-    // Jika dalam satuan 0.1 uW (> 10000)
-    if (num > 10000) {
-        const dbVal = 30 + (Math.log10(num * Math.pow(10, -7)) * 10);
-        return (Math.ceil(dbVal * 100) / 100).toFixed(2);
+    const raw = parseFloat(val);
+    if (isNaN(raw)) return String(val);
+    if (raw === 0 || raw >= 65535) return 'LOS';
+    // Format dBm langsung (misal: -17.08 s/d -49.99)
+    if (raw < 0 && raw > -50) {
+        return raw.toFixed(2);
     }
-    // Jika berupa angka positif desimal seperti 20.50 dBm
-    if (num > 0 && num < 100) {
-        return `-${num.toFixed(2)}`;
+    // Format 0.01 dBm (misal: -2240 -> -22.40 dBm)
+    if (raw <= -50) {
+        return (raw / 100).toFixed(2);
     }
-    return String(num);
+    // Format CTC EPON/GPON standar 0.1 uW (misal ZTE/CIOT/Fiberhome/Huawei: 59 -> -22.29 dBm)
+    if (raw > 0) {
+        const dbm = 30 + (Math.log10(raw * 1e-7) * 10);
+        return (Math.round(dbm * 100) / 100).toFixed(2);
+    }
+    return String(raw);
 }
 
 function extractRxPower(d) {
@@ -672,6 +675,15 @@ function extractRxPower(d) {
             return formatRxPower(val);
         }
     }
+
+    // 3. Fallback scan: cari properti apapun yang mengandung nama RXPower
+    const matches = getWildcardMatches(d, 'InternetGatewayDevice.WANDevice.*.*.*');
+    for (const m of matches) {
+        if (m.path && m.path.toLowerCase().includes('rxpower') && m.value !== undefined && m.value !== null && m.value !== '') {
+            return formatRxPower(m.value);
+        }
+    }
+
     return '-';
 }
 

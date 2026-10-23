@@ -98,14 +98,40 @@ function getParameterValue(device, path) {
     }
 }
 
+// Helper untuk format RX Power (dBm) sesuai standar TR-069 & CTC EPON 0.1 uW
+function formatRxPower(val) {
+    if (val === undefined || val === null || val === '-' || val === '' || val === 'N/A') return 'N/A';
+    const raw = parseFloat(val);
+    if (isNaN(raw)) return String(val);
+    if (raw === 0 || raw >= 65535) return 'LOS';
+    if (raw < 0 && raw > -50) return raw.toFixed(2);
+    if (raw <= -50) return (raw / 100).toFixed(2);
+    if (raw > 0) {
+        const dbm = 30 + (Math.log10(raw * 1e-7) * 10);
+        return (Math.round(dbm * 100) / 100).toFixed(2);
+    }
+    return String(raw);
+}
+
 // Parameter paths for different device parameters (updated with confirmed VirtualParameters)
 const parameterPaths = {
     rxPower: [
         'VirtualParameters.RXPower',                    // ✅ CONFIRMED: -19.74
+        'VirtualParameters.redaman',
+        'VirtualParameters.rx_power',
         'InternetGatewayDevice.WANDevice.1.WANPONInterfaceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_CMCC_EponInterfaceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_CT-COM_EponInterfaceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_CU_WANEPONInterfaceConfig.OpticalTransceiver.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_GponInterfaceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_ZTE_GponInterfaceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.RXPower',
+        'InternetGatewayDevice.WANDevice.1.X_FH_GponInterfaceConfig.RXPower',
         'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.X_ALU-COM_RxPower',
         'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.RxPower',
-        'Device.Optical.Interface.1.RxPower'
+        'Device.Optical.Interface.1.RxPower',
+        'Device.Optical.Interface.1.OpticalSignalLevel'
     ],
     pppoeIP: [
         'VirtualParameters.pppoeIP',                    // ✅ CONFIRMED: 192.168.10.159
@@ -334,7 +360,7 @@ async function handleDeviceStatus(remoteJid, senderNumber) {
         const serialNumber = device.InternetGatewayDevice?.DeviceInfo?.SerialNumber?._value || 'N/A';
         const firmware = getParameterWithPaths(device, parameterPaths.firmware) || 'N/A';
         const uptime = formatUptime(getParameterWithPaths(device, parameterPaths.uptime)) || 'N/A';
-        const rxPower = getParameterWithPaths(device, parameterPaths.rxPower) || 'N/A';
+        const rxPower = formatRxPower(getParameterWithPaths(device, parameterPaths.rxPower));
         const pppoeIP = getParameterWithPaths(device, parameterPaths.pppoeIP) || 'N/A';
         const pppUsername = getParameterWithPaths(device, parameterPaths.pppUsername) || 'N/A';
         const ssid = getSSIDValue(device, '1') || 'N/A';
@@ -707,7 +733,7 @@ async function handleAdminDeviceDetail(remoteJid, phoneNumber) {
 
         const uptime = formatUptime(getParameterWithPaths(device, parameterPaths.uptime)) || 'N/A';
 
-        const rxPower = getParameterWithPaths(device, parameterPaths.rxPower) || 'N/A';
+        const rxPower = formatRxPower(getParameterWithPaths(device, parameterPaths.rxPower));
         const pppoeIP = getParameterWithPaths(device, parameterPaths.pppoeIP) || 'N/A';
         const pppUsername = getParameterWithPaths(device, parameterPaths.pppUsername) || 'N/A';
         const ssid = getSSIDValue(device, '1') || 'N/A';
@@ -986,7 +1012,7 @@ async function handleNetworkDiagnostic(remoteJid, senderNumber) {
 
         const lastInform = device._lastInform;
         const isOnline = getDeviceStatus(lastInform);
-        const rxPower = getParameterWithPaths(device, parameterPaths.rxPower) || 'N/A';
+        const rxPower = formatRxPower(getParameterWithPaths(device, parameterPaths.rxPower));
         const pppoeIP = getParameterWithPaths(device, parameterPaths.pppoeIP) || 'N/A';
         const temperature = getParameterWithPaths(device, parameterPaths.temperature) || 'N/A';
 

@@ -708,11 +708,19 @@ function mapDeviceData(device, tag, isPppoeActive = false) {
   } catch {}
 
   let rxPower = getParameterWithPaths(device, parameterPaths.rxPower);
-  if (rxPower !== 'N/A' && rxPower !== '-' && rxPower !== '') {
-    const num = parseFloat(rxPower);
-    if (!isNaN(num) && num > 0) {
-      const dbVal = 30 + (Math.log10(num * Math.pow(10, -7)) * 10);
-      rxPower = (Math.ceil(dbVal * 100) / 100).toFixed(2);
+  if (rxPower !== 'N/A' && rxPower !== '-' && rxPower !== '' && rxPower !== null && rxPower !== undefined) {
+    const raw = parseFloat(rxPower);
+    if (!isNaN(raw)) {
+      if (raw === 0 || raw >= 65535) {
+        rxPower = 'LOS';
+      } else if (raw < 0 && raw > -50) {
+        rxPower = raw.toFixed(2);
+      } else if (raw <= -50) {
+        rxPower = (raw / 100).toFixed(2);
+      } else if (raw > 0) {
+        const dbm = 30 + (Math.log10(raw * 1e-7) * 10);
+        rxPower = (Math.round(dbm * 100) / 100).toFixed(2);
+      }
     }
   }
   const pppoeIP = extractPppoeIp(device);
