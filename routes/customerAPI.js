@@ -3635,7 +3635,7 @@ router.get('/dashboard', requireCustomerApiAuth, async (req, res) => {
     try {
       liveDevice = await Promise.race([
         customerDevice.getCustomerDeviceData(token),
-        new Promise(resolve => setTimeout(() => resolve(null), 2500))
+        new Promise(resolve => setTimeout(() => resolve(null), 5000))
       ]);
       if (liveDevice && liveDevice.status !== 'Tidak ditemukan') break;
     } catch (_) {}

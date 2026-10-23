@@ -59,6 +59,24 @@ async function searchDeviceAcrossServers(query, fullData = true) {
   }
 }
 
+
+// PPPoE Username search keys matching user's template
+const PPPOE_USER_KEYS = [
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username',
+  'InternetGatewayDevice.WANDevice.*.WANConnectionDevice.1.WANPPPConnection.2.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.2.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.1.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.2.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.1.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.2.Username',
+  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.5.WANPPPConnection.1.Username',
+  'InternetGatewayDevice.WANDevice.*.WANConnectionDevice.*.WANPPPConnection.*.Username',
+  'Device.PPP.Interface.1.Username',
+  'Device.PPP.Interface.2.Username',
+  'Device.PPP.Interface.3.Username'
+];
+
 async function findDeviceByTag(tag) {
   try {
     const query = { $or: [{ _id: tag }, { _tags: tag }] };
@@ -105,12 +123,27 @@ async function resolveDeviceToken(input) {
   const token = String(input ?? '').replace(/[\r\n\t]+/g, '').trim();
   if (!token) return null;
 
-  const direct = await findDeviceByTag(token);
-  if (direct && direct._id) return direct;
+  // 1. FAST SINGLE COMBINED QUERY: Cek _id, _tags, serial number, dan seluruh parameter PPPoE sekaligus dalam 1 query GenieACS
+  const combinedKeys = [
+    '_id',
+    '_tags',
+    '_deviceId._SerialNumber',
+    'DeviceID.SerialNumber',
+    'VirtualParameters.pppoeUsername2',
+    'VirtualParameters.pppoeUsername',
+    'VirtualParameters.pppUsername',
+    'VirtualParameters.PPPoEUser',
+    ...PPPOE_USER_KEYS
+  ];
+  try {
+    const query = { $or: combinedKeys.map(k => ({ [k]: token })) };
+    const direct = await searchDeviceAcrossServers(query, true);
+    if (direct && direct._id) return direct;
+  } catch (e) {
+    logger.debug(`[resolveDeviceToken] Fast combined query error: ${e.message}`);
+  }
 
-  const byPppoe = await findDeviceByPppoe(token);
-  if (byPppoe && byPppoe._id) return byPppoe;
-
+  // 2. Fallback: varian prefix tag/nomor (misal 62 vs 08)
   const found = await findDeviceWithTagVariants(token);
   if (found && found.device && found.device._id) return found.device;
 
@@ -234,22 +267,6 @@ const PPPOE_IP_KEYS = [
   'Device.IP.Interface.1.IPv4Address.1.IPAddress'
 ];
 
-// PPPoE Username search keys matching user's template
-const PPPOE_USER_KEYS = [
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username',
-  'InternetGatewayDevice.WANDevice.*.WANConnectionDevice.1.WANPPPConnection.2.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.2.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.1.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.2.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.1.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.2.Username',
-  'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.5.WANPPPConnection.1.Username',
-  'InternetGatewayDevice.WANDevice.*.WANConnectionDevice.*.WANPPPConnection.*.Username',
-  'Device.PPP.Interface.1.Username',
-  'Device.PPP.Interface.2.Username',
-  'Device.PPP.Interface.3.Username'
-];
 
 function getNestedValue(obj, path) {
   try {
@@ -773,6 +790,8 @@ function mapDeviceData(device, tag, isPppoeActive = false) {
   if (Array.isArray(lokasi)) lokasi = lokasi.join(', ');
 
   return {
+    id: device?._id || '',
+    tags: Array.isArray(device?._tags) ? device._tags : (device?._tags ? [device._tags] : []),
     phone: tag,
     ssid: ssidDisplay,
     status,
@@ -805,13 +824,17 @@ function mapDeviceData(device, tag, isPppoeActive = false) {
 async function getCustomerDeviceData(tag) {
   const base = await resolveDeviceToken(tag);
   if (!base || !base._id) return null;
-  const device = await fetchFullDevice(base._id);
+  const hasFullData = Boolean(base.InternetGatewayDevice || base.Device || base.VirtualParameters);
+  const device = hasFullData ? base : (await fetchFullDevice(base._id) || base);
   
   let isPppoeActive = false;
   try {
     const pppoeUser = extractPppoeUser(device);
     if (pppoeUser && pppoeUser !== 'N/A' && pppoeUser !== '-') {
-      const activeSessionsMap = await mikrotikService.getActivePppoeSessionsMap().catch(() => new Map());
+      const activeSessionsMap = await Promise.race([
+        mikrotikService.getActivePppoeSessionsMap(),
+        new Promise(r => setTimeout(() => r(new Map()), 500))
+      ]).catch(() => new Map());
       if (activeSessionsMap.has(pppoeUser.toLowerCase())) {
         isPppoeActive = true;
       }
@@ -863,44 +886,39 @@ async function updateSSID(tag, newSSID, actor = null) {
     const tasksUrl = `/devices/${deviceId}/tasks`;
 
     const parameterValues = [];
+    const igd = device.InternetGatewayDevice;
+    const dev181 = device.Device;
     
-    // Check supported paths in DB
-    const db = require('../config/database');
-    const row = db.prepare('SELECT params FROM acs_devices WHERE id = ?').get(device._id);
-    const flatParams = row && row.params ? JSON.parse(row.params) : null;
-    
-    if (flatParams) {
-      // SSID 2.4G paths
-      const paths24G = [
-        'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID',
-        'Device.WiFi.SSID.1.SSID'
-      ];
-      paths24G.forEach(p => {
-        if (flatParams[p] !== undefined) {
-          parameterValues.push([p, newSSID, 'xsd:string']);
-        }
-      });
-      
-      // SSID 5G paths
-      const paths5G = [
-        'Device.WiFi.SSID.2.SSID'
-      ];
-      for (const idx of [5, 6, 7, 8]) {
-        paths5G.push(`InternetGatewayDevice.LANDevice.1.WLANConfiguration.${idx}.SSID`);
+    // Check supported paths directly from loaded device object
+    if (igd && igd.LANDevice && igd.LANDevice['1'] && igd.LANDevice['1'].WLANConfiguration) {
+      const wlan = igd.LANDevice['1'].WLANConfiguration;
+      if (wlan['1']) {
+        parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID', newSSID, 'xsd:string']);
       }
-      paths5G.forEach(p => {
-        if (flatParams[p] !== undefined) {
-          parameterValues.push([p, `${newSSID}-5G`, 'xsd:string']);
+      const fiveGIndex = wlan['5'] ? '5' : (wlan['2'] ? '2' : null);
+      if (fiveGIndex) {
+        parameterValues.push([`InternetGatewayDevice.LANDevice.1.WLANConfiguration.${fiveGIndex}.SSID`, `${newSSID}-5G`, 'xsd:string']);
+      }
+    } else if (dev181 && dev181.WiFi) {
+      parameterValues.push(['Device.WiFi.SSID.1.SSID', newSSID, 'xsd:string']);
+      if (dev181.WiFi.SSID && dev181.WiFi.SSID['2']) {
+        parameterValues.push(['Device.WiFi.SSID.2.SSID', `${newSSID}-5G`, 'xsd:string']);
+      }
+    } else {
+      // Fallback check in local DB
+      const db = require('../config/database');
+      const row = db.prepare('SELECT params FROM acs_devices WHERE id = ?').get(device._id);
+      const flatParams = row && row.params ? JSON.parse(row.params) : null;
+      if (flatParams) {
+        if (flatParams['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID'] !== undefined) {
+          parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID', newSSID, 'xsd:string']);
+        } else if (flatParams['Device.WiFi.SSID.1.SSID'] !== undefined) {
+          parameterValues.push(['Device.WiFi.SSID.1.SSID', newSSID, 'xsd:string']);
         }
-      });
-    }
-    
-    // Fallback if no parameters match or device not bootstrapped yet
-    if (parameterValues.length === 0) {
-      parameterValues.push(
-        ['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID', newSSID, 'xsd:string'],
-        ['Device.WiFi.SSID.1.SSID', newSSID, 'xsd:string']
-      );
+      }
+      if (parameterValues.length === 0) {
+        parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID', newSSID, 'xsd:string']);
+      }
     }
 
     let ok = false;
@@ -982,65 +1000,55 @@ async function updatePassword(tag, newPassword, actor = null) {
     logger.info(`[updatePassword] Setting password for device ${deviceId}, tag ${tag}`);
 
     const parameterValues = [];
-    
-    // Check supported paths in DB
-    const db = require('../config/database');
-    const row = db.prepare('SELECT params FROM acs_devices WHERE id = ?').get(device._id);
-    const flatParams = row && row.params ? JSON.parse(row.params) : null;
-    
-    if (flatParams) {
-      // 2.4G password paths
-      const paths24G = [
-        'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase',
-        'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase',
-        'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey',
-        'Device.WiFi.AccessPoint.1.Security.KeyPassphrase',
-        'Device.WiFi.AccessPoint.1.Security.PreSharedKey'
-      ];
-      paths24G.forEach(p => {
-        if (flatParams[p] !== undefined) {
-          parameterValues.push([p, pw, 'xsd:string']);
-        }
-      });
-      
-      // 5G password paths
-      const paths5G = [
-        'Device.WiFi.AccessPoint.2.Security.KeyPassphrase',
-        'Device.WiFi.AccessPoint.2.Security.PreSharedKey'
-      ];
-      for (const idx of [5, 6, 7, 8]) {
-        paths5G.push(
-          `InternetGatewayDevice.LANDevice.1.WLANConfiguration.${idx}.KeyPassphrase`,
-          `InternetGatewayDevice.LANDevice.1.WLANConfiguration.${idx}.PreSharedKey.1.KeyPassphrase`,
-          `InternetGatewayDevice.LANDevice.1.WLANConfiguration.${idx}.PreSharedKey.1.PreSharedKey`
-        );
+    const igd = device.InternetGatewayDevice;
+    const dev181 = device.Device;
+
+    if (igd && igd.LANDevice && igd.LANDevice['1'] && igd.LANDevice['1'].WLANConfiguration) {
+      const wlan = igd.LANDevice['1'].WLANConfiguration;
+      const wlan1 = wlan['1'] || {};
+
+      if (wlan1.KeyPassphrase !== undefined) {
+        parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase', pw, 'xsd:string']);
       }
-      paths5G.forEach(p => {
-        if (flatParams[p] !== undefined) {
-          parameterValues.push([p, pw, 'xsd:string']);
+      if (wlan1.PreSharedKey && typeof wlan1.PreSharedKey === 'object') {
+        parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey', pw, 'xsd:string']);
+      }
+      if (parameterValues.length === 0) {
+        parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase', pw, 'xsd:string']);
+        parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey', pw, 'xsd:string']);
+      }
+
+      // 5G if available
+      const fiveGIndex = wlan['5'] ? '5' : (wlan['2'] ? '2' : null);
+      if (fiveGIndex) {
+        const wlan5 = wlan[fiveGIndex] || {};
+        if (wlan5.KeyPassphrase !== undefined) {
+          parameterValues.push([`InternetGatewayDevice.LANDevice.1.WLANConfiguration.${fiveGIndex}.KeyPassphrase`, pw, 'xsd:string']);
         }
-      });
-    }
-    
-    // Fallback if no parameters match or device not bootstrapped yet
-    if (parameterValues.length === 0) {
-      parameterValues.push(
-        ['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase', pw, 'xsd:string'],
-        ['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase', pw, 'xsd:string'],
-        ['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey', pw, 'xsd:string'],
-        ['Device.WiFi.AccessPoint.1.Security.KeyPassphrase', pw, 'xsd:string']
-      );
+        if (wlan5.PreSharedKey && typeof wlan5.PreSharedKey === 'object') {
+          parameterValues.push([`InternetGatewayDevice.LANDevice.1.WLANConfiguration.${fiveGIndex}.PreSharedKey.1.PreSharedKey`, pw, 'xsd:string']);
+        }
+      }
+    } else if (dev181 && dev181.WiFi) {
+      parameterValues.push(['Device.WiFi.AccessPoint.1.Security.KeyPassphrase', pw, 'xsd:string']);
+      if (dev181.WiFi.AccessPoint && dev181.WiFi.AccessPoint['2']) {
+        parameterValues.push(['Device.WiFi.AccessPoint.2.Security.KeyPassphrase', pw, 'xsd:string']);
+      }
+    } else {
+      parameterValues.push(['InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase', pw, 'xsd:string']);
     }
 
     let ok = false;
-    try {
-      await instance.post(tasksUrl, {
-        name: 'setParameterValues',
-        parameterValues: parameterValues
-      }, { timeout: 20000 });
-      ok = true;
-    } catch (e) {
-      logger.error(`[updatePassword] Failed to set password: ${e.message}`);
+    for (const pv of parameterValues) {
+      try {
+        await instance.post(tasksUrl, {
+          name: 'setParameterValues',
+          parameterValues: [pv]
+        }, { timeout: 15000 });
+        ok = true;
+      } catch (e) {
+        logger.debug(`[updatePassword] Param ${pv[0]} failed: ${e.message}`);
+      }
     }
 
     // Refresh object - only refresh InternetGatewayDevice path yang lebih universal
