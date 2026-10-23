@@ -4231,6 +4231,21 @@ router.post('/settings', requireAdminSession, express.urlencoded({ extended: tru
     newSettings.auto_backup_enabled = (newSettings.auto_backup_enabled === 'true');
     newSettings.use_builtin_acs = (newSettings.use_builtin_acs === 'true' || newSettings.use_builtin_acs === true);
 
+    // AI Provider & API Settings
+    if (newSettings.ai_provider) newSettings.ai_provider = String(newSettings.ai_provider).trim().toLowerCase();
+    if (newSettings.gemini_api_key) newSettings.gemini_api_key = String(newSettings.gemini_api_key).trim();
+    if (newSettings.openai_api_key) newSettings.openai_api_key = String(newSettings.openai_api_key).trim();
+    if (newSettings.openai_model) newSettings.openai_model = String(newSettings.openai_model).trim();
+    if (newSettings.deepseek_api_key) newSettings.deepseek_api_key = String(newSettings.deepseek_api_key).trim();
+    if (newSettings.deepseek_model) newSettings.deepseek_model = String(newSettings.deepseek_model).trim();
+    if (newSettings.groq_api_key) newSettings.groq_api_key = String(newSettings.groq_api_key).trim();
+    if (newSettings.groq_model) newSettings.groq_model = String(newSettings.groq_model).trim();
+    if (newSettings.openrouter_api_key) newSettings.openrouter_api_key = String(newSettings.openrouter_api_key).trim();
+    if (newSettings.openrouter_model) newSettings.openrouter_model = String(newSettings.openrouter_model).trim();
+    if (newSettings.custom_ai_api_key) newSettings.custom_ai_api_key = String(newSettings.custom_ai_api_key).trim();
+    if (newSettings.custom_ai_base_url) newSettings.custom_ai_base_url = String(newSettings.custom_ai_base_url).trim();
+    if (newSettings.custom_ai_model) newSettings.custom_ai_model = String(newSettings.custom_ai_model).trim();
+
     // Multi-Router Mode settings
     if (!newSettings.multi_router_mode) newSettings.multi_router_mode = 'disabled';
     if (newSettings.default_router_id) newSettings.default_router_id = parseInt(newSettings.default_router_id) || null;

@@ -212,19 +212,13 @@ async function getAdminGlobalContext(userQuestion) {
 }
 
 /**
- * Panggil Google Gemini API
+ * Buat System Instruction Terpadu untuk AI
  */
-async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', customerContext = null, isAdmin = false, adminContext = null) {
+function buildSystemInstruction(isAdmin, customerContext, adminContext, senderName) {
   const knowledge = loadKnowledgeBase();
-  const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.7-flash', 'gemini-3.8-flash'];
-  const preferredModel = getSetting('gemini_model', 'gemini-3.5-flash-lite');
-  
-  // Prioritaskan model pilihan user
-  const modelList = [preferredModel, ...models.filter(m => m !== preferredModel)];
 
-  let systemInstruction = '';
   if (isAdmin) {
-    systemInstruction = `Anda adalah asisten cerdas, serba tahu, dan handal yang mendampingi Pemilik / Administrator "RTRWNET Management & Billing System" (Botlokal).
+    return `Anda adalah asisten cerdas, serba tahu, dan handal yang mendampingi Pemilik / Administrator "RTRWNET Management & Billing System" (Botlokal).
 
 PEDOMAN UTAMA & ATURAN JAWABAN:
 1. TANPA BASA-BASI / TANPA DISCLAIMER KAKU:
@@ -252,10 +246,11 @@ ${adminContext || '(Tidak ada data kontekstual khusus)'}
 DOKUMENTASI SISTEM & PANDUAN PEMECAHAN MASALAH:
 ${knowledge}
 `;
-  } else {
-    let liveCustomerDataPrompt = '';
-    if (customerContext) {
-      liveCustomerDataPrompt = `
+  }
+
+  let liveCustomerDataPrompt = '';
+  if (customerContext) {
+    liveCustomerDataPrompt = `
 ----------------------------------------
 DATA STATUS LIVE PELANGGAN (Dari Database Server Billing):
 - Nama Pelanggan: ${customerContext.customerName || senderName}
@@ -269,9 +264,9 @@ PETUNJUK KHUSUS JIKA MENANYAKAN TAGIHAN / TUNGGAKAN / PEMBAYARAN:
 Jika pelanggan bertanya mengenai sisa tagihan, status pembayaran, jumlah uang yang harus dibayar, atau tunggakan miliknya, gunakan DATA STATUS LIVE di atas! Sebutkan nama pelanggan, total tagihan yang belum lunas beserta rincian periode bulannya secara sopan, jelas, dan ramah. Jika semua tagihan sudah lunas, beritahukan bahwa tagihan sudah lunas dan ucapkan terima kasih.
 ----------------------------------------
 `;
-    }
+  }
 
-    systemInstruction = `Anda adalah asisten cerdas, ramah, dan solutif untuk komunitas dan layanan pelanggan "RTRWNET Management & Billing System" (Botlokal).
+  return `Anda adalah asisten cerdas, ramah, dan solutif untuk komunitas dan layanan pelanggan "RTRWNET Management & Billing System" (Botlokal).
 
 PEDOMAN UTAMA & ATURAN JAWABAN:
 1. TANPA BASA-BASI KAKU:
@@ -290,7 +285,47 @@ ${liveCustomerDataPrompt}
 DOKUMENTASI SISTEM & PANDUAN PEMECAHAN MASALAH:
 ${knowledge}
 `;
+}
+
+/**
+ * Konversi skema function calling Gemini ke format standar OpenAI tools
+ */
+function convertGeminiToolsToOpenAI(declarations) {
+  if (!Array.isArray(declarations) || declarations.length === 0) return [];
+
+  function lowercaseTypes(schema) {
+    if (!schema || typeof schema !== 'object') return schema;
+    const copy = Array.isArray(schema) ? [] : {};
+    for (const [key, val] of Object.entries(schema)) {
+      if (key === 'type' && typeof val === 'string') {
+        copy[key] = val.toLowerCase();
+      } else if (typeof val === 'object' && val !== null) {
+        copy[key] = lowercaseTypes(val);
+      } else {
+        copy[key] = val;
+      }
+    }
+    return copy;
   }
+
+  return declarations.map(decl => ({
+    type: 'function',
+    function: {
+      name: decl.name,
+      description: decl.description,
+      parameters: decl.parameters ? lowercaseTypes(decl.parameters) : { type: 'object', properties: {} }
+    }
+  }));
+}
+
+/**
+ * Panggil Google Gemini API
+ */
+async function callGeminiApi(apiKey, userQuestion, senderName = 'Member', customerContext = null, isAdmin = false, adminContext = null) {
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  const preferredModel = getSetting('gemini_model', 'gemini-2.5-flash');
+  const modelList = [preferredModel, ...models.filter(m => m !== preferredModel)];
+  const systemInstruction = buildSystemInstruction(isAdmin, customerContext, adminContext, senderName);
 
   let lastError = null;
 
@@ -353,17 +388,14 @@ ${knowledge}
     } catch (err) {
       lastError = err;
       const status = err.response?.status;
-      // Jika error 404 (model tidak ditemukan), lanjut ke model berikutnya
       if (status === 404) {
         logger.warn(`[TelegramAI] Model ${model} tidak tersedia (404), mencoba model cadangan...`);
         continue;
       }
-      // Jika 429 atau quota limit, log dan coba model berikutnya
       if (status === 429) {
         logger.warn(`[TelegramAI] Model ${model} kena limit (429), mencoba model cadangan...`);
         continue;
       }
-      // Error lain (seperti Invalid API Key 400)
       if (status === 400) {
         throw new Error('API Key Gemini tidak valid atau belum diaktifkan.');
       }
@@ -372,6 +404,100 @@ ${knowledge}
   }
 
   throw lastError || new Error('Gagal mendapatkan respon dari AI.');
+}
+
+/**
+ * Panggil OpenAI-Compatible API (OpenAI, DeepSeek, Groq, OpenRouter, Custom / Local Ollama)
+ */
+async function callOpenAiCompatibleApi({
+  apiKey,
+  baseUrl,
+  model,
+  userQuestion,
+  senderName = 'Member',
+  customerContext = null,
+  isAdmin = false,
+  adminContext = null
+}) {
+  const systemInstruction = buildSystemInstruction(isAdmin, customerContext, adminContext, senderName);
+  const cleanBaseUrl = String(baseUrl || 'https://api.openai.com/v1').trim().replace(/\/+$/, '');
+  const url = `${cleanBaseUrl}/chat/completions`;
+
+  const messages = [
+    {
+      role: 'system',
+      content: systemInstruction
+    },
+    {
+      role: 'user',
+      content: `Pesan / Pertanyaan dari ${isAdmin ? `Admin (${senderName})` : senderName}:\n${userQuestion}`
+    }
+  ];
+
+  const payload = {
+    model: model,
+    messages: messages,
+    temperature: 0.2
+  };
+
+  if (isAdmin && Array.isArray(adminToolDeclarations) && adminToolDeclarations.length > 0) {
+    payload.tools = convertGeminiToolsToOpenAI(adminToolDeclarations);
+    payload.tool_choice = 'auto';
+  }
+
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+
+  if (apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+  }
+
+  if (cleanBaseUrl.includes('openrouter.ai')) {
+    headers['HTTP-Referer'] = 'https://alijayanet.net';
+    headers['X-Title'] = 'Alijaya Billing System';
+  }
+
+  const response = await axios.post(url, payload, {
+    headers,
+    timeout: 35000
+  });
+
+  const choice = response.data?.choices?.[0];
+  const message = choice?.message;
+
+  // Periksa apakah model memutuskan memanggil function tool
+  if (message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    const firstCall = message.tool_calls[0];
+    let parsedArgs = {};
+    if (typeof firstCall.function?.arguments === 'string') {
+      try {
+        parsedArgs = JSON.parse(firstCall.function.arguments);
+      } catch (e) {
+        parsedArgs = {};
+      }
+    } else if (typeof firstCall.function?.arguments === 'object' && firstCall.function?.arguments !== null) {
+      parsedArgs = firstCall.function.arguments;
+    }
+
+    return {
+      type: 'function_call',
+      functionCall: {
+        name: firstCall.function?.name,
+        args: parsedArgs || {}
+      }
+    };
+  }
+
+  // Jawaban teks biasa
+  if (message?.content && typeof message.content === 'string' && message.content.trim()) {
+    return {
+      type: 'text',
+      text: message.content.trim()
+    };
+  }
+
+  throw new Error('Respon AI kosong dari provider.');
 }
 
 /**
@@ -666,27 +792,87 @@ async function askAi({ question, senderName, customerContext = null, isAdmin = f
     }
   }
 
-  const apiKey = getSetting('gemini_api_key', '');
-  
-  if (apiKey && apiKey.trim()) {
-    try {
-      const aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName, customerContext, isAdmin, adminContext);
-      if (typeof aiReply === 'object' && aiReply?.type === 'function_call') {
-        const toolResult = await executeAdminTool(aiReply.functionCall.name, aiReply.functionCall.args, extraContext);
-        return toolResult;
+  const provider = (getSetting('ai_provider', 'gemini') || 'gemini').toLowerCase().trim();
+  let aiReply = null;
+
+  if (provider === 'gemini') {
+    const apiKey = getSetting('gemini_api_key', '');
+    if (apiKey && apiKey.trim()) {
+      try {
+        aiReply = await callGeminiApi(apiKey.trim(), cleanQ, senderName, customerContext, isAdmin, adminContext);
+      } catch (err) {
+        logger.error(`[TelegramAI] Gagal call Gemini API: ${err.message}. Menggunakan fallback jawaban lokal.`);
       }
-      if (typeof aiReply === 'object' && aiReply?.type === 'text') {
-        return aiReply.text;
+    }
+  } else {
+    // Multi-provider OpenAI compatible: openai, deepseek, groq, openrouter, custom
+    let apiKey = '';
+    let baseUrl = '';
+    let model = '';
+
+    if (provider === 'openai') {
+      apiKey = getSetting('openai_api_key', '');
+      baseUrl = 'https://api.openai.com/v1';
+      model = getSetting('openai_model', 'gpt-4o-mini') || 'gpt-4o-mini';
+    } else if (provider === 'deepseek') {
+      apiKey = getSetting('deepseek_api_key', '');
+      baseUrl = 'https://api.deepseek.com';
+      model = getSetting('deepseek_model', 'deepseek-chat') || 'deepseek-chat';
+    } else if (provider === 'groq') {
+      apiKey = getSetting('groq_api_key', '');
+      baseUrl = 'https://api.groq.com/openai/v1';
+      model = getSetting('groq_model', 'llama-3.3-70b-versatile') || 'llama-3.3-70b-versatile';
+    } else if (provider === 'openrouter') {
+      apiKey = getSetting('openrouter_api_key', '');
+      baseUrl = 'https://openrouter.ai/api/v1';
+      model = getSetting('openrouter_model', 'meta-llama/llama-3.3-70b-instruct') || 'meta-llama/llama-3.3-70b-instruct';
+    } else if (provider === 'custom') {
+      apiKey = getSetting('custom_ai_api_key', '');
+      baseUrl = getSetting('custom_ai_base_url', 'http://localhost:11434/v1');
+      model = getSetting('custom_ai_model', 'llama3') || 'llama3';
+    }
+
+    if ((apiKey && apiKey.trim()) || provider === 'custom') {
+      try {
+        aiReply = await callOpenAiCompatibleApi({
+          apiKey: apiKey ? apiKey.trim() : (provider === 'custom' ? 'ollama' : ''),
+          baseUrl,
+          model,
+          userQuestion: cleanQ,
+          senderName,
+          customerContext,
+          isAdmin,
+          adminContext
+        });
+      } catch (err) {
+        logger.error(`[TelegramAI] Gagal call AI (${provider}): ${err.message}`);
+        // Fallback ke Gemini jika gemini_api_key tersedia
+        const geminiKey = getSetting('gemini_api_key', '');
+        if (geminiKey && geminiKey.trim()) {
+          try {
+            logger.info('[TelegramAI] Mencoba fallback ke Gemini API...');
+            aiReply = await callGeminiApi(geminiKey.trim(), cleanQ, senderName, customerContext, isAdmin, adminContext);
+          } catch (geminiErr) {
+            logger.error(`[TelegramAI] Fallback ke Gemini juga gagal: ${geminiErr.message}`);
+          }
+        }
       }
-      return typeof aiReply === 'string' ? aiReply : (aiReply?.text || JSON.stringify(aiReply));
-    } catch (err) {
-      logger.error(`[TelegramAI] Gagal call Gemini API: ${err.message}. Menggunakan fallback jawaban lokal.`);
-      // Jika AI error, fallback ke jawaban offline
-      return getOfflineAnswer(cleanQ, customerContext, isAdmin, adminContext);
     }
   }
 
-  // Jika API key belum diatur, gunakan offline knowledge base
+  // Jika API berhasil memberikan respon (baik function tool maupun teks)
+  if (aiReply) {
+    if (typeof aiReply === 'object' && aiReply?.type === 'function_call') {
+      const toolResult = await executeAdminTool(aiReply.functionCall.name, aiReply.functionCall.args, extraContext);
+      return toolResult;
+    }
+    if (typeof aiReply === 'object' && aiReply?.type === 'text') {
+      return aiReply.text;
+    }
+    return typeof aiReply === 'string' ? aiReply : (aiReply?.text || JSON.stringify(aiReply));
+  }
+
+  // Jika API key belum diatur atau semua panggilan API gagal, gunakan offline knowledge base
   return getOfflineAnswer(cleanQ, customerContext, isAdmin, adminContext);
 }
 
