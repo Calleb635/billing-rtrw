@@ -101,7 +101,7 @@
                 <form action="/admin/acs/search" method="GET" class="srow">
                     <div class="sinput" style="max-width:340px">
                         <i class="bi bi-search"></i>
-                        <input class="fc" name="q" placeholder="Search SN, Customer, PPPoE..." required>
+                        <input class="fc" name="q" value="<%= (typeof searchQuery !== 'undefined' && searchQuery) ? searchQuery : '' %>" placeholder="Cari SN, Pelanggan, PPPoE, SSID, IP...">
                     </div>
                     <select class="fs" id="acsFilter" name="acs" style="width:200px" onchange="this.form.submit()">
                         <option value="all">All ACS Servers</option>
@@ -109,9 +109,9 @@
                             <option value="<%= s.id %>" <%= String(selectedAcsId) === String(s.id) ? 'selected' : '' %>><%= s.name %></option>
                         <% }); %>
                     </select>
-                    <button class="btn btn-g btn-sm" type="submit"><i class="bi bi-search"></i> Search</button>
+                    <button class="btn btn-g btn-sm" type="submit"><i class="bi bi-search"></i> Cari</button>
                     <% if (typeof searchQuery !== 'undefined' && searchQuery) { %>
-                        <a href="/admin/acs" class="btn btn-g btn-sm"><i class="bi bi-x"></i> Reset</a>
+                        <a href="/admin/acs<%= selectedAcsId ? '?acs=' + selectedAcsId : '' %>" class="btn btn-g btn-sm"><i class="bi bi-x"></i> Reset</a>
                     <% } %>
                 </form>
                 
@@ -130,18 +130,28 @@
                     <table>
                         <thead>
                             <tr>
-                                <th style="width: 40px;"><input type="checkbox" id="selectAllDevices" onchange="toggleSelectAll(this)"></th>
-                                <th>Device ID / SN</th>
-                                <th>Customer Name</th>
-                                <th>IP Address</th>
-                                <th>RX Power</th>
+                                <th style="width: 36px;"><input type="checkbox" id="selectAllDevices" onchange="toggleSelectAll(this)"></th>
+                                <th>Perangkat / SN</th>
+                                <th>Pelanggan</th>
                                 <th>PPPoE User</th>
-                                <th>ACS Server</th>
+                                <th>IP WAN</th>
+                                <th>Wi-Fi (SSID)</th>
+                                <th>Redaman (RX)</th>
+                                <th>Uptime</th>
                                 <th>Status</th>
-                                <th>Action</th>
+                                <th>Server</th>
+                                <th style="width: 100px;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
+                            <% if (devices.length === 0) { %>
+                            <tr>
+                                <td colspan="11" class="text-center text-muted" style="padding: 30px;">
+                                    <i class="bi bi-inbox" style="font-size: 28px; display:block; margin-bottom: 8px;"></i>
+                                    Tidak ada perangkat ONU ditemukan.
+                                </td>
+                            </tr>
+                            <% } %>
                             <% devices.forEach(d => { %>
                             <tr>
                                 <td>
@@ -149,30 +159,92 @@
                                 </td>
                                 <td>
                                     <a href="/admin/acs/device/<%= encodeURIComponent(d.id) %>?acsId=<%= d.acs_server_id || selectedAcsId %>" class="device-link">
-                                        <div style="font-weight:700; color:var(--primary);"><%= d.sn %></div>
-                                        <div style="font-size:10px; color:var(--muted);"><%= d.id %></div>
+                                        <div style="font-weight:700; color:var(--primary); font-size:13px;"><%= d.sn %></div>
+                                        <div style="font-size:11px; color:var(--muted);"><%= d.manufacturer %> <%= d.model %></div>
                                     </a>
                                 </td>
                                 <td>
                                     <% if (d.customer_name && d.customer_name !== '-') { %>
-                                        <div style="font-weight:700; color:var(--text);"><i class="bi bi-person-fill text-primary me-1"></i><%= d.customer_name %></div>
+                                        <div style="font-weight:700; color:var(--text); font-size:13px;">
+                                            <% if (d.customer_id) { %>
+                                                <a href="/admin/customers?q=<%= encodeURIComponent(d.customer_name) %>" style="color:inherit; text-decoration:none;" title="Lihat Data Pelanggan">
+                                                    <i class="bi bi-person-fill text-primary me-1"></i><%= d.customer_name %>
+                                                </a>
+                                            <% } else { %>
+                                                <i class="bi bi-person-fill text-primary me-1"></i><%= d.customer_name %>
+                                            <% } %>
+                                        </div>
                                     <% } else { %>
                                         <span class="text-muted" style="font-size:12px;">-</span>
                                     <% } %>
                                 </td>
-                                <td><code><%= d.ip %></code></td>
-                                <td><%= d.rx_power %> dBm</td>
-                                <td><%= d.pppoe_user %></td>
-                                <td><span class="acs-server-tag"><%= d.acs_server_name %></span></td>
+                                <td>
+                                    <% if (d.pppoe_user && d.pppoe_user !== '-') { %>
+                                        <code style="font-weight:600;"><%= d.pppoe_user %></code>
+                                    <% } else { %>
+                                        <span class="text-muted">-</span>
+                                    <% } %>
+                                </td>
+                                <td>
+                                    <% const devIp = d.ip || d.pppoe_ip; %>
+                                    <% if (devIp && devIp !== '-' && devIp !== '0.0.0.0') { %>
+                                        <code style="color:var(--text);"><%= devIp %></code>
+                                    <% } else { %>
+                                        <span class="text-muted">-</span>
+                                    <% } %>
+                                </td>
+                                <td>
+                                    <% if (d.wlan_ssid && d.wlan_ssid !== '-') { %>
+                                        <div style="font-weight:600; font-size:12px; color:var(--text);">
+                                            <i class="bi bi-wifi text-primary me-1"></i><%= d.wlan_ssid %>
+                                        </div>
+                                        <% if (d.connected_clients !== null && d.connected_clients !== undefined) { %>
+                                            <span style="font-size:10px; color:var(--muted);"><i class="bi bi-people me-1"></i><%= d.connected_clients %> klien</span>
+                                        <% } %>
+                                    <% } else { %>
+                                        <span class="text-muted">-</span>
+                                    <% } %>
+                                </td>
+                                <td>
+                                    <% 
+                                      const rxNum = parseFloat(d.rx_power);
+                                      let rxColor = 'var(--text)';
+                                      let rxIcon = 'bi-reception-4';
+                                      if (!isNaN(rxNum) && rxNum !== 0) {
+                                        if (rxNum >= -24 && rxNum <= -13) {
+                                          rxColor = '#10b981'; // Bagus (Hijau)
+                                          rxIcon = 'bi-reception-4';
+                                        } else if (rxNum < -24 && rxNum >= -27) {
+                                          rxColor = '#f59e0b'; // Sedang / Waspada (Kuning/Orange)
+                                          rxIcon = 'bi-reception-2';
+                                        } else {
+                                          rxColor = '#ef4444'; // Buruk / Kritis (Merah)
+                                          rxIcon = 'bi-reception-1';
+                                        }
+                                      }
+                                    %>
+                                    <% if (d.rx_power && d.rx_power !== '-') { %>
+                                        <span style="font-weight:700; color:<%= rxColor %>;">
+                                            <i class="bi <%= rxIcon %> me-1"></i><%= d.rx_power %> dBm
+                                        </span>
+                                    <% } else { %>
+                                        <span class="text-muted">-</span>
+                                    <% } %>
+                                </td>
+                                <td>
+                                    <span style="font-size:11px; color:var(--muted);"><%= d.uptime || '-' %></span>
+                                </td>
                                 <td>
                                     <span class="status-badge <%= d.isOnline ? 'status-up' : 'status-down' %>">
                                         <%= d.isOnline ? 'Online' : 'Offline' %>
                                     </span>
                                 </td>
+                                <td><span class="acs-server-tag"><%= d.acs_server_name %></span></td>
                                 <td>
-                                    <div style="display:flex; align-items:center; gap:8px;">
-                                        <button class="btn-action" onclick="refreshDevice('<%= d.id %>')" title="Refresh Device"><i class="fas fa-sync"></i></button>
+                                    <div style="display:flex; align-items:center; gap:6px;">
+                                        <button class="btn-action" onclick="refreshDevice('<%= d.id %>')" title="Summon / Refresh Device"><i class="fas fa-sync"></i></button>
                                         <button class="btn-action" onclick="openAddWanModal('<%= d.id %>', '<%= d.acs_server_id || selectedAcsId %>', '<%= d.sn %>', '<%= d.manufacturer || "" %>', '<%= d.model || "" %>')" title="Add WAN All-in-One"><i class="fas fa-network-wired"></i></button>
+                                        <a href="/admin/acs/device/<%= encodeURIComponent(d.id) %>?acsId=<%= d.acs_server_id || selectedAcsId %>" class="btn-action" title="Detail Perangkat"><i class="fas fa-eye"></i></a>
                                         <button class="btn-action danger" onclick="deleteDevice('<%= d.id %>', '<%= d.acs_server_id || selectedAcsId %>')" title="Hapus Perangkat"><i class="fas fa-trash"></i></button>
                                     </div>
                                 </td>

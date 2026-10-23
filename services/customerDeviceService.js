@@ -75,8 +75,10 @@ async function findDeviceByPppoe(pppoeUser) {
     const user = String(pppoeUser || '').trim();
     if (!user) return null;
     const keys = [
+      'VirtualParameters.pppoeUsername2',
       'VirtualParameters.pppoeUsername',
       'VirtualParameters.pppUsername',
+      'VirtualParameters.PPPoEUser',
       ...PPPOE_USER_KEYS
     ];
     const query = { $or: keys.map(k => ({ [k]: user })) };
@@ -132,6 +134,7 @@ const parameterPaths = {
     'Device.DeviceInfo.SoftwareVersion'
   ],
   ssid: [
+    'VirtualParameters.WlanSSID',
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID',
     'Device.WiFi.SSID.1.SSID',
     'Device.WiFi.SSID.2.SSID'
@@ -165,6 +168,8 @@ const parameterPaths = {
   pppoeIP: [
     'VirtualParameters.pppoeIP',
     'VirtualParameters.pppIP',
+    'VirtualParameters.WanIP',
+    'VirtualParameters.IPTR069',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ExternalIPAddress',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.ExternalIPAddress',
@@ -175,8 +180,10 @@ const parameterPaths = {
     'Device.IP.Interface.1.IPv4Address.1.IPAddress'
   ],
   pppUsername: [
+    'VirtualParameters.pppoeUsername2',
     'VirtualParameters.pppoeUsername',
     'VirtualParameters.pppUsername',
+    'VirtualParameters.PPPoEUser',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.2.Username',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.3.Username',
@@ -189,11 +196,17 @@ const parameterPaths = {
     'Device.PPP.Interface.3.Username'
   ],
   uptime: [
+    'VirtualParameters.getpppuptime',
+    'VirtualParameters.uptimeDevice',
     'VirtualParameters.getdeviceuptime',
+    'VirtualParameters.uptime',
     'InternetGatewayDevice.DeviceInfo.UpTime',
     'Device.DeviceInfo.UpTime'
   ],
   userConnected: [
+    'VirtualParameters.activedevices',
+    'VirtualParameters.userconnected',
+    'VirtualParameters.getAssociation',
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.TotalAssociations',
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.TotalAssociations',
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.AssociatedDeviceNumberOfEntries',
