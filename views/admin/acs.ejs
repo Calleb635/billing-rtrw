@@ -20,27 +20,27 @@
         .tab-bar button { padding:18px 25px; background:none; border:none; color:var(--muted); font-weight:600; cursor:pointer; transition:all 0.3s; border-bottom:3px solid transparent; display:flex; align-items:center; gap:8px; font-size:14px; }
         .tab-bar button.active { color:var(--primary); border-bottom-color:var(--primary); background:rgba(59,130,246,0.05); }
 
-        .tab-pane { padding:30px; display:none; animation:fadeIn 0.4s ease; }
+        .tab-pane { padding:20px 16px; display:none; animation:fadeIn 0.4s ease; }
         .tab-pane.active { display:block; }
         @keyframes fadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
 
         .table-container { width:100%; overflow-x:auto; }
         table { width:100%; border-collapse:collapse; }
-        th { background:var(--sub-bg); color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:1px; padding:15px 20px; text-align:left; }
-        td { padding:15px 20px; border-bottom:1px solid var(--border); font-size:13px; color:var(--text); vertical-align:middle; }
+        th { background:var(--sub-bg); color:var(--muted); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; padding:10px 8px; text-align:left; white-space:nowrap; }
+        td { padding:8px 8px; border-bottom:1px solid var(--border); font-size:12px; color:var(--text); vertical-align:middle; }
         tr:hover td { background:var(--hover-bg); }
 
-        .status-badge { padding:6px 12px; border-radius:20px; font-size:11px; font-weight:700; display:inline-flex; align-items:center; gap:6px; }
-        .status-up { background:rgba(16,185,129,0.1); color:#10B981; border:1px solid rgba(16,185,129,0.2); }
-        .status-down { background:rgba(239,68,68,0.1); color:#EF4444; border:1px solid rgba(239,68,68,0.2); }
+        .status-badge { padding:3px 8px; border-radius:12px; font-size:10px; font-weight:800; display:inline-flex; align-items:center; justify-content:center; gap:4px; text-transform:uppercase; min-width:38px; }
+        .status-up { background:rgba(16,185,129,0.12); color:#10B981; border:1px solid rgba(16,185,129,0.25); }
+        .status-down { background:rgba(239,68,68,0.12); color:#EF4444; border:1px solid rgba(239,68,68,0.25); }
 
-        .btn-action { width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); background:var(--sub-bg); color:var(--muted); cursor:pointer; transition:all 0.2s; }
-        .btn-action:hover { background:var(--primary); color:white; border-color:var(--primary); transform:scale(1.1); }
+        .btn-action { width:28px; height:28px; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--border); background:var(--sub-bg); color:var(--muted); cursor:pointer; transition:all 0.2s; font-size:11px; }
+        .btn-action:hover { background:var(--primary); color:white; border-color:var(--primary); transform:scale(1.08); }
         .btn-action.danger:hover { background:var(--danger); border-color:var(--danger); }
         .btn-action:disabled { opacity:0.5; cursor:not-allowed; }
         .btn-action:disabled:hover { background:var(--sub-bg); color:var(--muted); border-color:var(--border); transform:none; }
 
-        .acs-server-tag { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:6px; font-size:11px; font-weight:600; background:rgba(59,130,246,0.1); color:var(--primary); border:1px solid rgba(59,130,246,0.2); }
+        .acs-server-tag { display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:600; background:rgba(59,130,246,0.1); color:var(--primary); border:1px solid rgba(59,130,246,0.2); white-space:nowrap; }
         .acs-server-tag.offline { background:rgba(239,68,68,0.1); color:#EF4444; border-color:rgba(239,68,68,0.2); }
 
         .modal-overlay { position:fixed; inset:0; background:var(--overlay-bg); backdrop-filter:blur(6px); display:none; align-items:center; justify-content:center; z-index:2000; padding:20px; }
@@ -130,17 +130,17 @@
                     <table>
                         <thead>
                             <tr>
-                                <th style="width: 36px;"><input type="checkbox" id="selectAllDevices" onchange="toggleSelectAll(this)"></th>
-                                <th>Perangkat / SN</th>
+                                <th style="width: 32px;"><input type="checkbox" id="selectAllDevices" onchange="toggleSelectAll(this)"></th>
+                                <th style="white-space:nowrap;">Perangkat</th>
                                 <th>Pelanggan</th>
-                                <th>PPPoE User</th>
-                                <th>IP WAN</th>
-                                <th>Wi-Fi (SSID)</th>
-                                <th>Redaman (RX)</th>
-                                <th>Uptime</th>
-                                <th>Status</th>
-                                <th>Server</th>
-                                <th style="width: 100px;">Aksi</th>
+                                <th style="white-space:nowrap;">PPPoE</th>
+                                <th style="white-space:nowrap;">IP WAN</th>
+                                <th style="white-space:nowrap;">Wi-Fi (SSID)</th>
+                                <th style="white-space:nowrap;">Redaman (RX)</th>
+                                <th style="white-space:nowrap;">Uptime</th>
+                                <th style="text-align:center; white-space:nowrap;">Status</th>
+                                <th style="white-space:nowrap;">Server</th>
+                                <th style="text-align:center; width:125px; white-space:nowrap;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -158,14 +158,23 @@
                                     <input type="checkbox" class="device-checkbox" data-id="<%= d.id %>" data-acs="<%= d.acs_server_id || selectedAcsId %>" onchange="updateBulkPanel()">
                                 </td>
                                 <td>
-                                    <a href="/admin/acs/device/<%= encodeURIComponent(d.id) %>?acsId=<%= d.acs_server_id || selectedAcsId %>" class="device-link">
-                                        <div style="font-weight:700; color:var(--primary); font-size:13px;"><%= d.sn %></div>
-                                        <div style="font-size:11px; color:var(--muted);"><%= d.manufacturer %> <%= d.model %></div>
+                                    <% 
+                                      let devName = '-';
+                                      if (d.model && d.model !== '-') {
+                                        devName = (d.manufacturer && d.manufacturer !== '-' && !d.model.toLowerCase().includes(d.manufacturer.toLowerCase()) ? d.manufacturer + ' ' : '') + d.model;
+                                      } else if (d.manufacturer && d.manufacturer !== '-') {
+                                        devName = d.manufacturer;
+                                      } else if (d.sn && d.sn !== '-') {
+                                        devName = d.sn;
+                                      }
+                                    %>
+                                    <a href="/admin/acs/device/<%= encodeURIComponent(d.id) %>?acsId=<%= d.acs_server_id || selectedAcsId %>" class="device-link" title="SN: <%= d.sn %> (<%= d.manufacturer %> <%= d.model %>)">
+                                        <div style="font-weight:700; color:var(--primary); font-size:12px; white-space:nowrap;"><%= devName %></div>
                                     </a>
                                 </td>
                                 <td>
                                     <% if (d.customer_name && d.customer_name !== '-') { %>
-                                        <div style="font-weight:700; color:var(--text); font-size:13px;">
+                                        <div style="font-weight:700; color:var(--text); font-size:12px; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="<%= d.customer_name %>">
                                             <% if (d.customer_id) { %>
                                                 <a href="/admin/customers?q=<%= encodeURIComponent(d.customer_name) %>" style="color:inherit; text-decoration:none;" title="Lihat Data Pelanggan">
                                                     <i class="bi bi-person-fill text-primary me-1"></i><%= d.customer_name %>
@@ -175,34 +184,34 @@
                                             <% } %>
                                         </div>
                                     <% } else { %>
-                                        <span class="text-muted" style="font-size:12px;">-</span>
+                                        <span class="text-muted" style="font-size:11px;">-</span>
                                     <% } %>
                                 </td>
                                 <td>
                                     <% if (d.pppoe_user && d.pppoe_user !== '-') { %>
-                                        <code style="font-weight:600;"><%= d.pppoe_user %></code>
+                                        <code style="font-weight:600; font-size:11px; max-width:105px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block;" title="<%= d.pppoe_user %>"><%= d.pppoe_user %></code>
                                     <% } else { %>
-                                        <span class="text-muted">-</span>
+                                        <span class="text-muted" style="font-size:11px;">-</span>
                                     <% } %>
                                 </td>
                                 <td>
                                     <% const devIp = d.ip || d.pppoe_ip; %>
                                     <% if (devIp && devIp !== '-' && devIp !== '0.0.0.0') { %>
-                                        <code style="color:var(--text);"><%= devIp %></code>
+                                        <code style="color:var(--text); font-size:11px; white-space:nowrap;"><%= devIp %></code>
                                     <% } else { %>
-                                        <span class="text-muted">-</span>
+                                        <span class="text-muted" style="font-size:11px;">-</span>
                                     <% } %>
                                 </td>
                                 <td>
                                     <% if (d.wlan_ssid && d.wlan_ssid !== '-') { %>
-                                        <div style="font-weight:600; font-size:12px; color:var(--text);">
+                                        <div style="font-weight:600; font-size:11px; color:var(--text); max-width:115px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="<%= d.wlan_ssid %>">
                                             <i class="bi bi-wifi text-primary me-1"></i><%= d.wlan_ssid %>
                                         </div>
                                         <% if (d.connected_clients !== null && d.connected_clients !== undefined) { %>
                                             <span style="font-size:10px; color:var(--muted);"><i class="bi bi-people me-1"></i><%= d.connected_clients %> klien</span>
                                         <% } %>
                                     <% } else { %>
-                                        <span class="text-muted">-</span>
+                                        <span class="text-muted" style="font-size:11px;">-</span>
                                     <% } %>
                                 </td>
                                 <td>
@@ -226,28 +235,28 @@
                                       }
                                     %>
                                     <% if (isLos) { %>
-                                        <span class="badge" style="background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); font-weight:700;">
+                                        <span class="badge" style="background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); font-weight:700; font-size:10px; padding:2px 5px;">
                                             <i class="bi bi-exclamation-triangle me-1"></i>LOS
                                         </span>
                                     <% } else if (rxText && rxText !== '-') { %>
-                                        <span style="font-weight:700; color:<%= rxColor %>;">
+                                        <span style="font-weight:700; font-size:11px; white-space:nowrap; color:<%= rxColor %>;">
                                             <i class="bi <%= rxIcon %> me-1"></i><%= rxText %> dBm
                                         </span>
                                     <% } else { %>
-                                        <span class="text-muted">-</span>
+                                        <span class="text-muted" style="font-size:11px;">-</span>
                                     <% } %>
                                 </td>
                                 <td>
-                                    <span style="font-size:11px; color:var(--muted);"><%= d.uptime || '-' %></span>
+                                    <span style="font-size:11px; color:var(--muted); white-space:nowrap;"><%= d.uptime || '-' %></span>
                                 </td>
-                                <td>
+                                <td style="text-align: center;">
                                     <span class="status-badge <%= d.isOnline ? 'status-up' : 'status-down' %>">
-                                        <%= d.isOnline ? 'Online' : 'Offline' %>
+                                        <%= d.isOnline ? 'ON' : 'OFF' %>
                                     </span>
                                 </td>
                                 <td><span class="acs-server-tag"><%= d.acs_server_name %></span></td>
-                                <td>
-                                    <div style="display:flex; align-items:center; gap:6px;">
+                                <td style="text-align: center;">
+                                    <div style="display:inline-flex; align-items:center; gap:4px; white-space:nowrap;">
                                         <button class="btn-action" onclick="refreshDevice('<%= d.id %>')" title="Summon / Refresh Device"><i class="fas fa-sync"></i></button>
                                         <button class="btn-action" onclick="openAddWanModal('<%= d.id %>', '<%= d.acs_server_id || selectedAcsId %>', '<%= d.sn %>', '<%= d.manufacturer || "" %>', '<%= d.model || "" %>')" title="Add WAN All-in-One"><i class="fas fa-network-wired"></i></button>
                                         <a href="/admin/acs/device/<%= encodeURIComponent(d.id) %>?acsId=<%= d.acs_server_id || selectedAcsId %>" class="btn-action" title="Detail Perangkat"><i class="fas fa-eye"></i></a>
