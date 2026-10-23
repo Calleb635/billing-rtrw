@@ -612,6 +612,16 @@ const telnetLoginAndRun = async (host, user, pass, commands, opts = {}) => {
   return outputs.join('\n');
 };
 
+const isOnlineStatus = (s) => {
+  if (!s) return false;
+  const lower = String(s).trim().toLowerCase();
+  if (lower === 'down' || lower === 'offline' || lower === 'disable' || lower === 'poweroff' || lower === 'los') return false;
+  return lower === 'up' || lower === 'online' || lower.includes('on') || lower.includes('active') || lower.includes('working') || lower.includes('ctcnegdone');
+};
+
+const HIOSO_OPTICAL_CACHE = new Map();
+const OPTICAL_CACHE_TTL_MS = 5 * 60 * 1000;
+
 const parseHiosoOnuTable = (text) => {
   if (!text) return [];
   const lines = String(text).split(/\r?\n/);
@@ -671,21 +681,23 @@ const parseHiosoOnuTable = (text) => {
       // OnuId MacAddress Status Firmware ChipId Ge Fe Pots CtcStatus CtcVer Activate Uptime [Name]
       const id = parts[0];
       const mac = parts[1];
-      const status = parts[2];
+      const rawStatus = parts[2];
+      const isOnline = isOnlineStatus(rawStatus);
       const fwVersion = parts[3];
       const chipId = parts[4];
       const ports = (parts[5] || '0') + '/' + (parts[6] || '0');
       const ctcStatus = parts[8];
       const ctcVer = parts[9];
       const activate = parts[10];
-      const uptime = parts[11];
+      const uptime = parts[11] || '-';
       const name = parts.length > 12 ? parts.slice(12).join(' ') : null;
 
       rows.push({
         id,
         name: name === 'NA' || !name ? null : name,
-        mac,
-        status,
+        mac: formatSnWithColons(mac),
+        status: isOnline ? 'Online' : 'Offline',
+        rawStatus,
         fwVersion,
         chipId,
         ports,
@@ -694,6 +706,7 @@ const parseHiosoOnuTable = (text) => {
         ctcVer,
         activate,
         uptime,
+        onlineTime: uptime,
         txPower: 'N/A',
         rxPower: 'N/A'
       });
@@ -703,28 +716,142 @@ const parseHiosoOnuTable = (text) => {
   return rows;
 };
 
-const fetchHiosoOnuDetailViaTelnet = async (olt) => {
+const fetchHiosoOnuDetailViaTelnet = async (olt, full = false, stats = null) => {
   const user = olt.web_user || 'admin';
   const pass = olt.web_password || 'admin';
-  const cmds = [
-    'show onu info epon 0/1 all',
-    'show onu info epon 0/2 all',
-    'show onu info epon 0/3 all',
-    'show onu info epon 0/4 all',
-    'show onu',
-    'show onu all',
-    'show onu info',
-    'show onu status',
-  ];
+  const enablePassword = olt.enable_password || pass || 'admin';
+  const telnetPort = olt.telnet_port || 23;
+
+  const socket = new net.Socket();
+  socket.setTimeout(full ? 60000 : 20000);
+
+  const promptRe = /[>#]\s*$/m;
+  const loginRe = /(login|username)\s*[:>]\s*$/im;
+  const passRe = /(password|passwd)\s*[:>]\s*$/im;
 
   try {
-    const out = await telnetLoginAndRun(olt.host, user, pass, cmds, {
-      port: olt.telnet_port || 23,
-      enablePassword: olt.enable_password || pass || 'admin'
+    await new Promise((resolve, reject) => {
+      socket.connect(telnetPort, olt.host, resolve);
+      socket.once('error', reject);
     });
-    const rows = parseHiosoOnuTable(out);
-    return rows.length > 0 ? rows : null;
-  } catch (e) {
+
+    const banner = await telnetReadUntil(socket, (b) => loginRe.test(b) || passRe.test(b) || promptRe.test(b), 6000);
+    if (loginRe.test(banner)) {
+      socket.write(String(user) + '\r\n');
+      await telnetReadUntil(socket, passRe, 6000);
+      socket.write(String(pass) + '\r\n');
+      await telnetReadUntil(socket, promptRe, 6000);
+    } else if (passRe.test(banner)) {
+      socket.write(String(pass) + '\r\n');
+      await telnetReadUntil(socket, promptRe, 6000);
+    }
+
+    if (enablePassword) {
+      socket.write('enable\r\n');
+      const enBuf = await telnetReadUntil(socket, (b) => /password\s*[:>]\s*$/im.test(b) || promptRe.test(b), 6000);
+      if (/password\s*[:>]\s*$/im.test(enBuf)) {
+        socket.write(enablePassword + '\r\n');
+        await telnetReadUntil(socket, promptRe, 6000);
+      }
+    }
+
+    socket.write('terminal length 0\r\n');
+    await telnetReadUntil(socket, promptRe, 3000);
+
+    // Ambil system metrics (CPU, RAM, Uptime, Suhu modul OLT) jika stats disediakan
+    if (stats) {
+      try {
+        socket.write('show cpu resource\r\n');
+        const cpuOut = await telnetReadUntil(socket, promptRe, 3000);
+        const cpuMatch = cpuOut.match(/CPU usage\s*:\s*(\d+)%/i);
+        if (cpuMatch) stats.cpu = `${cpuMatch[1]}%`;
+        const ramMatch = cpuOut.match(/Memory usage\s*:\s*([\d\.]+)%/i);
+        if (ramMatch) stats.ram = `${Math.round(parseFloat(ramMatch[1]))}%`;
+        const uptimeMatch = cpuOut.match(/OS up time\s*:\s*([^\r\n]+)/i);
+        if (uptimeMatch) stats.uptime = uptimeMatch[1].trim();
+
+        socket.write('show epon 0/1 optical-ddm\r\n');
+        const tempOut = await telnetReadUntil(socket, promptRe, 3000);
+        const tempMatch = tempOut.match(/Temperature\s*:\s*([\d\.]+)\s*C/i);
+        if (tempMatch) stats.temp = `${parseFloat(tempMatch[1]).toFixed(0)}°C`;
+      } catch (eMetrics) {
+        logger.debug(`[oltService] Metrics fetch in telnet session: ${eMetrics.message}`);
+      }
+    }
+
+    // Ambil daftar ONU dari semua port EPON (0/1 - 0/4)
+    const allInfoLines = [];
+    for (let port = 1; port <= 4; port++) {
+      socket.write(`show onu info epon 0/${port} all\r\n`);
+      const res = await telnetReadUntil(socket, promptRe, 8000);
+      allInfoLines.push(res);
+    }
+
+    const rows = parseHiosoOnuTable(allInfoLines.join('\n'));
+    if (!rows || rows.length === 0) {
+      try { socket.destroy(); } catch (e) {}
+      return null;
+    }
+
+    // Ambil optical DDM & hitung estimasi jarak untuk ONU yang Online
+    const now = Date.now();
+    const opticalDeadline = now + 25000; // max 25 detik
+
+    for (const row of rows) {
+      const cacheKey = `${olt.id}:${row.id}`;
+      const cached = HIOSO_OPTICAL_CACHE.get(cacheKey);
+
+      if (isOnlineStatus(row.status)) {
+        if (cached && (now - cached.updatedAt < OPTICAL_CACHE_TTL_MS)) {
+          row.txPower = cached.tx;
+          row.rxPower = cached.rx;
+          row.distance = cached.distance;
+        } else if (full && Date.now() < opticalDeadline) {
+          const m = String(row.id).match(/^0\/(\d+):(\d+)/);
+          if (m) {
+            try {
+              socket.write(`show onu optical-ddm epon 0/${m[1]} ${m[2]}\r\n`);
+              const ddmOut = await telnetReadUntil(socket, promptRe, 1500);
+              const txM = ddmOut.match(/TxPower\s*:\s*([-\d\.]+)\s*dBm/i);
+              const rxM = ddmOut.match(/RxPower\s*:\s*([-\d\.]+)\s*dBm/i);
+
+              if (txM) row.txPower = `${txM[1]} dBm`;
+              if (rxM) {
+                row.rxPower = `${rxM[1]} dBm`;
+                const rxNum = parseFloat(rxM[1]);
+                if (!isNaN(rxNum) && rxNum < 0) {
+                  const estM = Math.min(10000, Math.max(100, Math.round(((Math.abs(rxNum) - 14) / 0.35) * 100)));
+                  row.distance = estM >= 1000 ? (estM / 1000).toFixed(1) + ' km' : estM + ' m';
+                }
+              }
+
+              HIOSO_OPTICAL_CACHE.set(cacheKey, {
+                tx: row.txPower || 'N/A',
+                rx: row.rxPower || 'N/A',
+                distance: row.distance || '-',
+                updatedAt: Date.now()
+              });
+            } catch (errOpt) {
+              logger.debug(`[oltService] Optical DDM fetch error for ${row.id}: ${errOpt.message}`);
+            }
+          }
+        } else if (cached) {
+          row.txPower = cached.tx;
+          row.rxPower = cached.rx;
+          row.distance = cached.distance;
+        }
+      } else {
+        row.txPower = 'N/A';
+        row.rxPower = 'N/A';
+        row.distance = '-';
+      }
+    }
+
+    try { socket.end(); } catch (e) {}
+    return rows;
+  } catch (err) {
+    try { socket.destroy(); } catch (e) {}
+    logger.warn(`[oltService] fetchHiosoOnuDetailViaTelnet failed: ${err.message}`);
     return null;
   }
 };
@@ -1272,7 +1399,7 @@ const fetchHiosoSystemMetricsViaTelnet = async (olt, stats) => {
   const pass = olt.web_password || 'admin';
   const cmds = [
     'show cpu resource',
-    'show epon optical-ddm 0/1'
+    'show epon 0/1 optical-ddm'
   ];
   try {
     const out = await telnetLoginAndRun(olt.host, user, pass, cmds, {
@@ -1658,8 +1785,8 @@ async function getOltStatsInternal(id, full = false) {
 
   const session = snmp.createSession(olt.host, community, {
     port:     olt.snmp_port || 161,
-    timeout:  full ? 10000 : 5000,
-    retries:  full ? 2 : 1,
+    timeout:  full ? 3500 : 2500,
+    retries:  1,
     version:  snmp.Version2c,
   });
 
@@ -1699,29 +1826,37 @@ async function getOltStatsInternal(id, full = false) {
         if (!uptimeVbs[0] || uptimeVbs[0].type === snmp.ObjectType.NoSuchObject || uptimeVbs[0].type === snmp.ObjectType.EndOfMibView) {
           // Telnet Fallback for HIOSO/HSGQ if SNMP is not enabled
           if (brandKey === 'hioso' || brandKey === 'hsgq') {
-            const telnetData = await fetchHiosoOnuDetailViaTelnet(olt);
+            const telnetData = await fetchHiosoOnuDetailViaTelnet(olt, full, stats);
             if (telnetData && telnetData.length > 0) {
               stats.status = 'Online';
               stats.error = null;
               stats.onus_total = telnetData.length;
-              stats.onus_online = telnetData.filter(r => String(r.status).toLowerCase().includes('on')).length;
+              stats.onus_online = telnetData.filter(r => isOnlineStatus(r.status)).length;
               stats.onus_offline = stats.onus_total - stats.onus_online;
+              stats.onus_weak = telnetData.filter(r => {
+                const rxVal = parseFloat(r.rxPower || r.rx);
+                return Number.isFinite(rxVal) && rxVal < -27;
+              }).length;
+
               if (full) {
                 stats.onus = telnetData.map((r, idx) => ({
                   index: r.id || idx,
                   id: r.id || '-',
                   name: r.name || r.mac || `ONU-${idx+1}`,
                   sn: formatSnWithColons(r.mac) || '-',
-                  status: String(r.status).toLowerCase().includes('on') ? 'Online' : 'Offline',
-                  offline_reason: translateOfflineReason(brandKey, r.offlineReason),
-                  tx: r.txPower || 'N/A',
-                  rx: r.rxPower || 'N/A',
+                  status: isOnlineStatus(r.status) ? 'Online' : 'Offline',
+                  offline_reason: isOnlineStatus(r.status) ? null : translateOfflineReason(brandKey, r.offlineReason || 'LOS / Power Off'),
+                  tx: r.txPower || r.tx || 'N/A',
+                  rx: r.rxPower || r.rx || 'N/A',
                   distance: r.distance || '-',
                   firmware: r.fwVersion || '-',
-                  uptime: r.onlineTime || '-'
+                  uptime: r.uptime || r.onlineTime || '-'
                 }));
+                stats.onus = enrichOnusWithCustomerData(stats.onus);
               }
-              await fetchHiosoSystemMetricsViaTelnet(olt, stats);
+              if (stats.cpu === 'N/A' || stats.temp === 'N/A' || stats.uptime === 'N/A') {
+                await fetchHiosoSystemMetricsViaTelnet(olt, stats);
+              }
               safeResolve(stats);
               return;
             }
@@ -1748,29 +1883,37 @@ async function getOltStatsInternal(id, full = false) {
         if (!activeProfile) {
           // Telnet Fallback if profile not matched
           if (brandKey === 'hioso' || brandKey === 'hsgq') {
-            const telnetData = await fetchHiosoOnuDetailViaTelnet(olt);
+            const telnetData = await fetchHiosoOnuDetailViaTelnet(olt, full, stats);
             if (telnetData && telnetData.length > 0) {
               stats.status = 'Online';
               stats.error = null;
               stats.onus_total = telnetData.length;
-              stats.onus_online = telnetData.filter(r => String(r.status).toLowerCase().includes('on')).length;
+              stats.onus_online = telnetData.filter(r => isOnlineStatus(r.status)).length;
               stats.onus_offline = stats.onus_total - stats.onus_online;
+              stats.onus_weak = telnetData.filter(r => {
+                const rxVal = parseFloat(r.rxPower || r.rx);
+                return Number.isFinite(rxVal) && rxVal < -27;
+              }).length;
+
               if (full) {
                 stats.onus = telnetData.map((r, idx) => ({
                   index: r.id || idx,
                   id: r.id || '-',
                   name: r.name || r.mac || `ONU-${idx+1}`,
                   sn: formatSnWithColons(r.mac) || '-',
-                  status: String(r.status).toLowerCase().includes('on') ? 'Online' : 'Offline',
-                  offline_reason: translateOfflineReason(brandKey, r.offlineReason),
-                  tx: r.txPower || 'N/A',
-                  rx: r.rxPower || 'N/A',
+                  status: isOnlineStatus(r.status) ? 'Online' : 'Offline',
+                  offline_reason: isOnlineStatus(r.status) ? null : translateOfflineReason(brandKey, r.offlineReason || 'LOS / Power Off'),
+                  tx: r.txPower || r.tx || 'N/A',
+                  rx: r.rxPower || r.rx || 'N/A',
                   distance: r.distance || '-',
                   firmware: r.fwVersion || '-',
-                  uptime: r.onlineTime || '-'
+                  uptime: r.uptime || r.onlineTime || '-'
                 }));
+                stats.onus = enrichOnusWithCustomerData(stats.onus);
               }
-              await fetchHiosoSystemMetricsViaTelnet(olt, stats);
+              if (stats.cpu === 'N/A' || stats.temp === 'N/A' || stats.uptime === 'N/A') {
+                await fetchHiosoSystemMetricsViaTelnet(olt, stats);
+              }
               safeResolve(stats);
               return;
             }
@@ -2090,6 +2233,14 @@ function enrichOnusWithCustomerData(onus) {
           if (mac.length >= 8 && (snClean.includes(mac) || mac.includes(snClean))) {
             matched = c;
             break;
+          }
+        }
+        if (!matched) {
+          for (const [tag, c] of tagMap.entries()) {
+            if (tag.length >= 8 && (tag.toLowerCase().includes(snClean) || snClean.includes(tag.toLowerCase()))) {
+              matched = c;
+              break;
+            }
           }
         }
       }
