@@ -147,6 +147,37 @@ async function resolveDeviceToken(input) {
   const found = await findDeviceWithTagVariants(token);
   if (found && found.device && found.device._id) return found.device;
 
+  // 3. Fallback: Cari di database billing customers (jika token berupa ID, phone, PPPoE, atau MAC)
+  try {
+    const db = require('../config/database');
+    const cust = db.prepare(`
+      SELECT pppoe_username, genieacs_tag, mac_address, phone 
+      FROM customers 
+      WHERE phone = ? OR id = ? OR pppoe_username = ? OR genieacs_tag = ? OR mac_address = ?
+      LIMIT 1
+    `).get(token, token, token, token, token);
+
+    if (cust) {
+      const candidates = Array.from(new Set([
+        cust.pppoe_username,
+        cust.genieacs_tag,
+        cust.mac_address,
+        cust.phone
+      ].map(v => String(v || '').trim()).filter(v => v && v !== token)));
+
+      for (const cand of candidates) {
+        try {
+          const direct = await searchDeviceAcrossServers({ $or: combinedKeys.map(k => ({ [k]: cand })) }, true);
+          if (direct && direct._id) return direct;
+        } catch (_) {}
+        const f = await findDeviceWithTagVariants(cand);
+        if (f && f.device && f.device._id) return f.device;
+      }
+    }
+  } catch (e) {
+    logger.debug(`[resolveDeviceToken] Customer DB fallback error: ${e.message}`);
+  }
+
   return null;
 }
 
@@ -943,6 +974,31 @@ async function updateSSID(tag, newSSID, actor = null) {
     // Tunggu sesaat agar task dieksekusi oleh ONU
     if (ok) {
       await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Sinkronkan nama WiFi (SSID) baru ke database pelanggan
+      try {
+        const db = require('../config/database');
+        const pppoeUser = extractPppoeUser(device);
+        const tagCandidate = (device._tags && device._tags[0]) || null;
+        const snCandidate = device._deviceId?._SerialNumber || null;
+        const idCandidate = device._id || null;
+
+        const cust = db.prepare(`
+          SELECT id FROM customers 
+          WHERE id = ? 
+             OR (pppoe_username IS NOT NULL AND pppoe_username != '' AND (pppoe_username = ? OR pppoe_username = ?))
+             OR (genieacs_tag IS NOT NULL AND genieacs_tag != '' AND (genieacs_tag = ? OR genieacs_tag = ?))
+             OR (mac_address IS NOT NULL AND mac_address != '' AND (mac_address = ? OR mac_address = ? OR mac_address = ?))
+             OR phone = ?
+          LIMIT 1
+        `).get(tag, tag, pppoeUser, tag, tagCandidate, tag, snCandidate, idCandidate, tag);
+
+        if (cust && cust.id) {
+          db.prepare('UPDATE customers SET wifi_ssid = ? WHERE id = ?').run(newSSID, cust.id);
+        }
+      } catch (err) {
+        logger.debug(`[updateSSID] Failed to sync customer wifi_ssid: ${err.message}`);
+      }
     }
 
     // Catat audit trail jika berhasil
@@ -1050,6 +1106,11 @@ async function updatePassword(tag, newPassword, actor = null) {
       await instance.post(tasksUrl, { name: 'refreshObject', objectName: 'InternetGatewayDevice.LANDevice.1.WLANConfiguration' }, { timeout: 15000 });
     } catch (e) {}
     // Skip Device.WiFi.AccessPoint refresh karena tidak semua ONU support (CIOT tidak support)
+
+    // Tunggu sesaat agar task dieksekusi oleh ONU
+    if (ok) {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
 
     // Catat audit trail jika berhasil
     if (ok && actor) {

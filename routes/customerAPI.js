@@ -3774,6 +3774,7 @@ router.post('/wifi/change-ssid', requireCustomerApiAuth, async (req, res) => {
   const tokens = Array.from(new Set([
     customer.pppoe_username,
     customer.genieacs_tag,
+    customer.mac_address,
     customer.onu_sn,
     customer.phone,
     String(customer.id)
@@ -3807,17 +3808,18 @@ router.post('/wifi/change-ssid', requireCustomerApiAuth, async (req, res) => {
 
 // Ubah Sandi WiFi Saja (Password)
 router.post('/wifi/change-password', requireCustomerApiAuth, async (req, res) => {
-  const { newPassword } = req.body;
-  if (!newPassword || newPassword.trim().length < 8) {
+  const newPassword = String(req.body?.newPassword || req.body?.password || '').replace(/[\r\n\t]+/g, '').trim();
+  if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ success: false, message: 'Sandi WiFi minimal 8 karakter.' });
   }
   const customer = req.customer;
-  const newPass = newPassword.trim();
+  const newPass = newPassword;
 
   // Kirim ke GenieACS TR-069
   const tokens = Array.from(new Set([
     customer.pppoe_username,
     customer.genieacs_tag,
+    customer.mac_address,
     customer.onu_sn,
     customer.phone,
     String(customer.id)
