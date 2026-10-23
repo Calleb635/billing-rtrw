@@ -78,7 +78,15 @@
                         <span class="text-muted">-</span>
                     <% } %>
                 </div>
-                <div class="info-row"><span>SSID</span><span><%= device.ssid || '-' %></span></div>
+                <div class="info-row" style="align-items:center;">
+                    <span>SSID Wi-Fi</span>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-weight:700;"><%= device.ssid || '-' %></span>
+                        <button type="button" class="btn btn-p btn-sm" onclick="openWifiModal('<%= device.id || device.sn %>', '<%= (device.ssid || "").replace(/'/g, "\\'") %>', '<%= device.serialNumber || device.sn || "" %>', '<%= (device.pppoeUsername || "").replace(/'/g, "\\'") %>')" style="padding:2px 8px; font-size:11px;">
+                            <i class="bi bi-pencil-square me-1"></i>Ubah Wi-Fi
+                        </button>
+                    </div>
+                </div>
                 <div class="info-row"><span>Uptime</span><span><%= device.uptime || '-' %></span></div>
                 <div class="info-row"><span>PPPoE Uptime</span><span><%= device.pppoeUptime || '-' %></span></div>
             </div>
@@ -124,5 +132,185 @@
         </footer>
     </div>
 </div>
+
+<!-- Modal Kelola Wi-Fi ONU (SSID & Password Terpisah) -->
+<div class="mo" id="wifiModal">
+  <div class="mb" style="max-width:480px">
+    <div class="mh">
+      <span class="mt"><i class="bi bi-wifi text-primary me-2"></i>Kelola Wi-Fi ONU</span>
+      <button class="mc" onclick="closeModal('wifiModal')">&times;</button>
+    </div>
+    <div class="mbody">
+      <div style="background:var(--sub-bg); padding:10px 14px; border-radius:10px; margin-bottom:15px; border:1px solid var(--border); font-size:12px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+          <span style="color:var(--muted)">PPPoE User:</span>
+          <code id="modalWifiPppoe" style="color:var(--primary); font-weight:700;">-</code>
+        </div>
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:var(--muted)">Device Token:</span>
+          <span id="modalWifiDeviceSn" style="font-family:monospace; font-size:11px; color:var(--muted);">-</span>
+        </div>
+      </div>
+
+      <input type="hidden" id="modalWifiDeviceId">
+      <input type="hidden" id="modalWifiPppoeUser">
+
+      <!-- Form 1: Ubah Nama WiFi (SSID) -->
+      <div style="background:var(--card-bg); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:14px;">
+        <label style="display:block; font-size:12px; font-weight:700; margin-bottom:6px; color:var(--text);">
+          <i class="bi bi-broadcast text-primary me-1"></i>Nama Wi-Fi (SSID)
+        </label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="modalWifiSsid" class="fc" placeholder="Nama WiFi (SSID) baru..." style="flex:1; font-size:13px;">
+          <button type="button" id="btnSaveSsid" class="btn btn-p" onclick="submitChangeSsid()" style="font-size:12px; padding:8px 14px; white-space:nowrap;">
+            <span class="btn-text"><i class="bi bi-check-lg me-1"></i>Simpan SSID</span>
+            <span class="btn-loader" style="display:none;"><i class="fas fa-spinner fa-spin"></i></span>
+          </button>
+        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:5px;">
+          Minimal 2 karakter. Klik "Simpan SSID" untuk mengirim nama WiFi baru ke modem.
+        </div>
+      </div>
+
+      <!-- Form 2: Ubah Sandi WiFi (Password) -->
+      <div style="background:var(--card-bg); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:16px;">
+        <label style="display:block; font-size:12px; font-weight:700; margin-bottom:6px; color:var(--text);">
+          <i class="bi bi-key-fill text-warning me-1"></i>Sandi Wi-Fi (Password)
+        </label>
+        <div style="display:flex; gap:8px;">
+          <div style="position:relative; flex:1;">
+            <input type="password" id="modalWifiPassword" class="fc" placeholder="Sandi baru (min 8 karakter)..." style="width:100%; font-size:13px; padding-right:34px;">
+            <i class="bi bi-eye" id="toggleWifiPass" onclick="toggleWifiPassVisibility()" style="position:absolute; right:10px; top:50%; transform:translateY(-50%); cursor:pointer; color:var(--muted); font-size:14px;"></i>
+          </div>
+          <button type="button" id="btnSavePassword" class="btn btn-s" onclick="submitChangePassword()" style="font-size:12px; padding:8px 14px; white-space:nowrap; background:#10b981; color:white;">
+            <span class="btn-text"><i class="bi bi-check-lg me-1"></i>Simpan Sandi</span>
+            <span class="btn-loader" style="display:none;"><i class="fas fa-spinner fa-spin"></i></span>
+          </button>
+        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:5px;">
+          Minimal 8 karakter WPA2/WPA3. Klik "Simpan Sandi" untuk memperbarui password di modem.
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end;">
+        <button type="button" class="btn btn-g" onclick="closeModal('wifiModal')" style="font-size:12px; padding:8px 16px;">Tutup</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function openModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+document.querySelectorAll('.mo').forEach(m => m.addEventListener('click', e => { if (e.target === m) closeModal(m.id); }));
+
+function openWifiModal(deviceId, currentSsid, sn, pppoeUser) {
+    document.getElementById('modalWifiDeviceId').value = deviceId || '';
+    document.getElementById('modalWifiPppoeUser').value = pppoeUser || '';
+    document.getElementById('modalWifiSsid').value = currentSsid || '';
+    document.getElementById('modalWifiPassword').value = '';
+    
+    document.getElementById('modalWifiPppoe').textContent = pppoeUser || '-';
+    document.getElementById('modalWifiDeviceSn').textContent = sn || deviceId || '-';
+
+    openModal('wifiModal');
+}
+
+function toggleWifiPassVisibility() {
+    const input = document.getElementById('modalWifiPassword');
+    const icon = document.getElementById('toggleWifiPass');
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.remove('bi-eye');
+        icon.classList.add('bi-eye-slash');
+    } else {
+        input.type = 'password';
+        icon.classList.remove('bi-eye-slash');
+        icon.classList.add('bi-eye');
+    }
+}
+
+async function submitChangeSsid() {
+    const deviceId = document.getElementById('modalWifiDeviceId').value;
+    const pppoeUser = document.getElementById('modalWifiPppoeUser').value;
+    const ssid = document.getElementById('modalWifiSsid').value.trim();
+
+    if (!ssid || ssid.length < 2) {
+        alert('Nama WiFi (SSID) minimal 2 karakter.');
+        return;
+    }
+
+    const btn = document.getElementById('btnSaveSsid');
+    const txt = btn.querySelector('.btn-text');
+    const ldr = btn.querySelector('.btn-loader');
+
+    btn.disabled = true;
+    txt.style.display = 'none';
+    ldr.style.display = 'inline-block';
+
+    try {
+        const token = pppoeUser || deviceId;
+        const res = await fetch('/admin/acs/api/device/' + encodeURIComponent(token) + '/ssid', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ssid })
+        });
+        const data = await res.json();
+        if (data.success) {
+            alert(data.message || 'Nama WiFi (SSID) berhasil diperbarui di perangkat!');
+            location.reload();
+        } else {
+            alert(data.message || 'Gagal mengubah SSID.');
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        txt.style.display = 'inline-block';
+        ldr.style.display = 'none';
+    }
+}
+
+async function submitChangePassword() {
+    const deviceId = document.getElementById('modalWifiDeviceId').value;
+    const pppoeUser = document.getElementById('modalWifiPppoeUser').value;
+    const password = document.getElementById('modalWifiPassword').value.trim();
+
+    if (!password || password.length < 8) {
+        alert('Sandi WiFi minimal 8 karakter.');
+        return;
+    }
+
+    const btn = document.getElementById('btnSavePassword');
+    const txt = btn.querySelector('.btn-text');
+    const ldr = btn.querySelector('.btn-loader');
+
+    btn.disabled = true;
+    txt.style.display = 'none';
+    ldr.style.display = 'inline-block';
+
+    try {
+        const token = pppoeUser || deviceId;
+        const res = await fetch('/admin/acs/api/device/' + encodeURIComponent(token) + '/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+        });
+        const data = await res.json();
+        if (data.success) {
+            alert(data.message || 'Sandi WiFi berhasil diperbarui di perangkat!');
+            document.getElementById('modalWifiPassword').value = '';
+        } else {
+            alert(data.message || 'Gagal mengubah sandi WiFi.');
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        txt.style.display = 'inline-block';
+        ldr.style.display = 'none';
+    }
+}
+</script>
 </body>
 </html>

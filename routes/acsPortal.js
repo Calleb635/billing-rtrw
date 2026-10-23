@@ -1642,6 +1642,53 @@ router.get('/api/wifi-settings/:deviceId', requireAdmin, async (req, res) => {
     }
 });
 
+// POST /admin/acs/api/device/:deviceId/ssid
+router.post('/api/device/:deviceId/ssid', requireAdmin, express.json(), async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        const ssid = String(req.body.ssid || '').trim();
+        if (!ssid || ssid.length < 2) {
+            return res.status(400).json({ success: false, message: 'Nama WiFi (SSID) minimal 2 karakter' });
+        }
+
+        const ok = await customerDevice.updateSSID(deviceId, ssid);
+        if (ok) {
+            try {
+                const cust = db.prepare('SELECT id, phone, name FROM customers WHERE id = ? OR pppoe_username = ? OR genieacs_tag = ? OR onu_sn = ?').get(deviceId, deviceId, deviceId, deviceId);
+                if (cust) {
+                    db.prepare('UPDATE customers SET wifi_ssid = ? WHERE id = ?').run(ssid, cust.id);
+                }
+            } catch (_) {}
+
+            return res.json({ success: true, message: `Nama WiFi (SSID) berhasil diubah menjadi "${ssid}"` });
+        }
+
+        return res.status(500).json({ success: false, message: 'Gagal mengubah SSID di modem. Pastikan perangkat aktif.' });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// POST /admin/acs/api/device/:deviceId/password
+router.post('/api/device/:deviceId/password', requireAdmin, express.json(), async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        const password = String(req.body.password || '').trim();
+        if (!password || password.length < 8) {
+            return res.status(400).json({ success: false, message: 'Sandi WiFi minimal 8 karakter' });
+        }
+
+        const ok = await customerDevice.updatePassword(deviceId, password);
+        if (ok) {
+            return res.json({ success: true, message: 'Sandi WiFi berhasil diperbarui di modem' });
+        }
+
+        return res.status(500).json({ success: false, message: 'Gagal mengubah sandi WiFi di modem. Pastikan perangkat aktif.' });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 router.get('/api/add-wan-status/:deviceId', requireAdmin, async (req, res) => {
     try {
         const { deviceId } = req.params;
