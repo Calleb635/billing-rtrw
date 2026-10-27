@@ -716,7 +716,7 @@ function isWhatsappAdminKey(key, adminSet, sock, lidStore) {
   return false;
 }
 
-function parseCommand(text, isAdmin) {
+export function parseCommand(text, isAdmin) {
   const t = String(text || '').trim();
   if (!t) return null;
   const parts = t.split(/\s+/);
@@ -725,6 +725,12 @@ function parseCommand(text, isAdmin) {
   const cmd = cleanFirst.toLowerCase();
   const rest = t.slice(rawFirst.length).trim();
 
+  // Mode AI WhatsApp: 'admin_only' (default/rekomendasi), true (semua), atau false (nonaktif)
+  const aiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+  const isAiCompletelyOff = (aiMode === false || aiMode === 'false');
+  const isCustomerAiAllowed = !isAiCompletelyOff && (aiMode === true || aiMode === 'true' || aiMode === 'all');
+  const isAdminAiAllowed = !isAiCompletelyOff;
+
   if (['menu', 'bantuan', 'help'].includes(cmd)) return { cmd: 'menu', rest: '' };
 
   // Deteksi ping / salam pembuka: 'p', 'p.', 'assalamualaikum', 'halo', 'hai', 'selamat pagi/siang/sore/malam' (Hanya jika salam murni tanpa pertanyaan lanjutan)
@@ -732,9 +738,14 @@ function parseCommand(text, isAdmin) {
     return { cmd: 'greeting', raw: t };
   }
 
-  // Perintah AI Asisten (Hanya untuk Admin resmi)
-  if (isAdmin && ['tanya', 'ai', 'ask', 'konsultasi', 'bot'].includes(cmd)) {
-    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : ''), isAdmin: true };
+  // Perintah AI Asisten
+  if (['tanya', 'ai', 'ask', 'konsultasi', 'bot'].includes(cmd)) {
+    if (isAdmin && isAdminAiAllowed) {
+      return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : ''), isAdmin: true };
+    }
+    if (!isAdmin && isCustomerAiAllowed) {
+      return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : ''), isAdmin: false };
+    }
   }
 
   if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
@@ -857,15 +868,22 @@ function parseCommand(text, isAdmin) {
   if (cmd === 'daftar') return { cmd: 'daftar', rest };
   if (cmd === 'reboot' || cmd === 'restartonu') return { cmd: 'reboot', rest: '' };
 
-  // Khusus Nomor Admin WhatsApp: Jika pesan diakhiri tanda tanya '?' atau berupa chat santai, teruskan ke AI
-  if (isAdmin) {
-    if (t.endsWith('?') && t.length >= 6) {
+  // Pertanyaan yang diakhiri tanda tanya '?' (minimal 6 karakter)
+  if (t.endsWith('?') && t.length >= 6) {
+    if (isAdmin && isAdminAiAllowed) {
       return { cmd: 'ai_ask', prefix: 'question', rest: t, isAdmin: true };
     }
+    if (!isAdmin && isCustomerAiAllowed) {
+      return { cmd: 'ai_ask', prefix: 'question', rest: t, isAdmin: false };
+    }
+  }
+
+  // Khusus Nomor Admin WhatsApp: Jika bukan perintah di atas dan AI diizinkan, teruskan chat santai ke AI
+  if (isAdmin && isAdminAiAllowed) {
     return { cmd: 'ai_ask', prefix: 'admin_chat', rest: t, isAdmin: true };
   }
 
-  // Selain admin (pelanggan): Chat di luar perintah tidak direspons oleh bot agar tidak mengganggu pelanggan
+  // Selain admin (pelanggan): Chat biasa di luar perintah tidak direspons oleh bot agar tidak mengganggu pelanggan & CS leluasa membalas
   return null;
 }
 
@@ -1073,6 +1091,10 @@ async function notifyCustomer(sock, lidStore, tag, message) {
 
 function getMenuText() {
   const { companyHeader, footerInfo, sep } = waBrand();
+  const aiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+  const isCustomerAiAllowed = (aiMode === true || aiMode === 'true' || aiMode === 'all');
+  const aiLine = isCustomerAiAllowed ? `🤖 \`tanya\` _pertanyaan_ — Tanya Asisten AI\n` : '';
+
   return `📱 *MENU PELANGGAN*
 ${sep}
 🏢 *${companyHeader}*
@@ -1088,7 +1110,7 @@ ${sep}
 🔑 \`ganti sandi\` / \`gantisandi\` _sandi_ — Ubah password (min 8)
 🔄 \`reboot\` — Restart ONU
 🔗 \`daftar\` _tag/nomor_ — Bind nomor WA
-
+${aiLine}
   ${sep}
   ${footerInfo ? footerInfo : '💡 *Contoh:* `cektagihan`'}`;
 }
@@ -1962,28 +1984,38 @@ export async function processIncomingCommand({
         }
 
         if (parsed.cmd === 'ai_ask') {
-          // AI bot HANYA diaktifkan untuk nomor Admin resmi
-          if (!isAdmin) {
+          const aiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+          const isAiCompletelyOff = (aiMode === false || aiMode === 'false');
+          const isCustomerAiAllowed = !isAiCompletelyOff && (aiMode === true || aiMode === 'true' || aiMode === 'all');
+
+          if (isAiCompletelyOff) {
+            if (isAdmin) {
+              await reply('ℹ️ Fitur Asisten AI WhatsApp sedang dinonaktifkan di pengaturan.');
+            }
+            return false;
+          }
+
+          if (!isAdmin && !isCustomerAiAllowed) {
             logger.info(`[WA AI] AI ask diabaikan untuk non-admin (${phone}): "${text}"`);
             return false;
           }
 
-          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
-          if (!isAiEnabled) {
-            await reply('ℹ️ Fitur Asisten AI WhatsApp sedang dinonaktifkan di pengaturan.');
-            return true;
-          }
           const q = parsed.rest;
           if (!q) {
             await reply('💡 Silakan tulis pertanyaan setelah kata kunci *tanya* atau *ai*.\n\nContoh:\n• *tanya status server*\n• *ai berapa pelanggan yang belum bayar?*');
             return true;
           }
           try {
+            let customerContext = null;
+            if (!isAdmin) {
+              customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
+            }
+
             const aiReply = await telegramAi.askAi({
               question: q,
-              senderName: senderName || 'Admin',
-              customerContext: null,
-              isAdmin: true,
+              senderName: senderName || (isAdmin ? 'Admin' : 'Pelanggan'),
+              customerContext: customerContext,
+              isAdmin: Boolean(isAdmin),
               extraContext: { reply, sock: currentSockInstance, lidStore: currentLidStore, phone }
             });
             await reply(aiReply);

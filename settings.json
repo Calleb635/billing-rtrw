@@ -92,5 +92,6 @@
   "radius_send_group": "0",
   "wa_gateway_type": "baileys",
   "fonnte_token": "",
-  "fonnte_api_url": "https://api.fonnte.com/send"
+  "fonnte_api_url": "https://api.fonnte.com/send",
+  "whatsapp_ai_enabled": "admin_only"
 }

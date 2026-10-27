@@ -575,12 +575,15 @@
             <div style="font-size:10px; color:var(--muted); margin-top:4px">Rekomendasi: Minimal 2 detik agar tidak terdeteksi spam oleh WhatsApp.</div>
           </div>
           <div class="fg">
-            <label class="fl">Asisten AI WhatsApp (CS Otomatis)</label>
+            <label class="fl">Mode Bot AI WhatsApp</label>
             <select class="fs" name="whatsapp_ai_enabled">
-              <option value="true" <%= settings.whatsapp_ai_enabled !== false ? 'selected' : '' %>>Aktif</option>
-              <option value="false" <%= settings.whatsapp_ai_enabled === false ? 'selected' : '' %>>Nonaktif</option>
+              <option value="admin_only" <%= (settings.whatsapp_ai_enabled === 'admin_only' || settings.whatsapp_ai_enabled === undefined || settings.whatsapp_ai_enabled === null) ? 'selected' : '' %>>🔒 Khusus Admin Saja (Disarankan)</option>
+              <option value="true" <%= (settings.whatsapp_ai_enabled === true || settings.whatsapp_ai_enabled === 'true') ? 'selected' : '' %>>🌐 Aktif untuk Semua (Admin & Pelanggan)</option>
+              <option value="false" <%= (settings.whatsapp_ai_enabled === false || settings.whatsapp_ai_enabled === 'false') ? 'selected' : '' %>>⏸️ Nonaktif Sepenuhnya</option>
             </select>
-            <div style="font-size:10px; color:var(--muted); margin-top:4px">Menjawab otomatis pertanyaan seputar paket, tagihan, dan panduan fitur menggunakan Mesin AI yang dikonfigurasi di atas.</div>
+            <div style="font-size:10px; color:var(--muted); margin-top:4px">
+              Pilih <b>Khusus Admin Saja</b> agar pelanggan tidak dijawab AI sehingga CS manusia leluasa membalas tanpa terganggu bot.
+            </div>
           </div>
         </div>
 

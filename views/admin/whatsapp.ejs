@@ -211,6 +211,64 @@
       }
     </script>
 
+    <!-- PENGATURAN MODE BOT AI WHATSAPP -->
+    <div class="card mb16" style="padding: 20px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:15px;">
+        <h6 style="margin:0; font-weight:700; color:var(--primary); font-size:15px;">
+          <i class="bi bi-robot"></i> Mode & Kontrol Bot AI WhatsApp
+        </h6>
+        <% if (whatsappAiMode === true || whatsappAiMode === 'true') { %>
+          <span class="badge" style="background:#e0f2fe; color:#0369a1; padding:6px 12px; border-radius:20px; font-weight:600; font-size:12px;">
+            <i class="bi bi-broadcast"></i> Aktif untuk Semua (Admin & Pelanggan)
+          </span>
+        <% } else if (whatsappAiMode === false || whatsappAiMode === 'false') { %>
+          <span class="badge" style="background:#f1f5f9; color:#475569; padding:6px 12px; border-radius:20px; font-weight:600; font-size:12px;">
+            <i class="bi bi-slash-circle"></i> Nonaktif Sepenuhnya
+          </span>
+        <% } else { %>
+          <span class="badge" style="background:#dcfce7; color:#15803d; padding:6px 12px; border-radius:20px; font-weight:600; font-size:12px;">
+            <i class="bi bi-shield-lock-fill"></i> Khusus Admin Saja (Disarankan)
+          </span>
+        <% } %>
+      </div>
+
+      <p style="font-size:13px; color:var(--muted); margin-bottom:16px;">
+        Atur perilaku Asisten AI pada WhatsApp. Anda dapat membatasi AI agar hanya merespons Admin, aktif untuk semua pelanggan, atau dinonaktifkan sepenuhnya.
+      </p>
+
+      <form method="POST" action="/admin/whatsapp/ai-settings">
+        <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end; margin-bottom:16px;">
+          <div style="flex:1; min-width:280px;">
+            <label style="display:block; font-size:12px; font-weight:600; margin-bottom:6px; color:var(--text);">Pilih Mode Respon Bot AI</label>
+            <select class="fc" name="whatsapp_ai_enabled" style="font-weight:600; padding:10px 14px; height:auto; width:100%;">
+              <option value="admin_only" <%= (whatsappAiMode === 'admin_only' || whatsappAiMode === undefined || whatsappAiMode === null) ? 'selected' : '' %>>
+                🔒 Khusus Admin Saja (Disarankan - CS Pelanggan Bebas Chat Manual)
+              </option>
+              <option value="true" <%= (whatsappAiMode === true || whatsappAiMode === 'true') ? 'selected' : '' %>>
+                🌐 Aktif untuk Semua (Admin & Pelanggan Otomatis Dijawab AI)
+              </option>
+              <option value="false" <%= (whatsappAiMode === false || whatsappAiMode === 'false') ? 'selected' : '' %>>
+                ⏸️ Nonaktif Sepenuhnya (Bot AI WhatsApp Mati Total)
+              </option>
+            </select>
+          </div>
+          <div>
+            <button type="submit" class="btn btn-p" style="padding:10px 20px;">
+              <i class="bi bi-save"></i> Simpan Mode AI
+            </button>
+          </div>
+        </div>
+
+        <div style="background: rgba(0,0,0,0.02); border-left: 3px solid var(--primary); padding: 12px 14px; border-radius: 4px; font-size: 12px; color: var(--muted); line-height: 1.6;">
+          <ul style="margin: 0; padding-left: 18px;">
+            <li><b>🔒 Khusus Admin Saja:</b> Pertanyaan dari pelanggan biasa <u>tidak dijawab AI</u> sehingga Admin / CS manusia leluasa membalas tanpa bot ikut campur. Admin tetap bisa berkonsultasi dengan AI via WhatsApp.</li>
+            <li><b>🌐 Aktif untuk Semua:</b> Pelanggan yang bertanya (misal berakhiran tanda tanya <code>?</code> atau diawali kata <code>tanya</code>) akan dijawab otomatis oleh AI.</li>
+            <li><b>⏸️ Nonaktif Sepenuhnya:</b> Fitur Bot AI WhatsApp dinonaktifkan untuk semua nomor.</li>
+          </ul>
+        </div>
+      </form>
+    </div>
+
     <div class="card">
       <div class="wa-status-card">
         <div id="status-icon" class="status-indicator status-close">
