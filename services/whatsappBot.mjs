@@ -732,16 +732,9 @@ function parseCommand(text, isAdmin) {
     return { cmd: 'greeting', raw: t };
   }
 
-  if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
-    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
-  }
-
-  if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
-    return { cmd: 'agent_saldo' };
-  }
-
-  if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
-    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
+  // Perintah AI Asisten (Hanya untuk Admin resmi)
+  if (isAdmin && ['tanya', 'ai', 'ask', 'konsultasi', 'bot'].includes(cmd)) {
+    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : ''), isAdmin: true };
   }
 
   if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
@@ -858,22 +851,21 @@ function parseCommand(text, isAdmin) {
   }
 
   // Customer Commands
-  if (['cektagihan', 'tagihan', 'cek_tagihan', 'bill', 'invoicewa'].includes(cmd)) return { cmd: 'cektagihan', rest: '' };
+  if (['cektagihan', 'tagihan', 'cek_tagihan', 'bill', 'billing', 'biling', 'invoicewa'].includes(cmd)) return { cmd: 'cektagihan', rest: '' };
   if (['info', 'cekstatus', 'cekonu', 'statusonu', 'status'].includes(cmd)) return { cmd: 'info', rest: '' };
   if (cmd === 'cekterhubung') return { cmd: 'cekterhubung', rest: '' };
   if (cmd === 'daftar') return { cmd: 'daftar', rest };
   if (cmd === 'reboot' || cmd === 'restartonu') return { cmd: 'reboot', rest: '' };
 
-  // Otomatis respon AI jika pesan diakhiri tanda tanya '?' (minimal 6 karakter)
-  if (t.endsWith('?') && t.length >= 6) {
-    return { cmd: 'ai_ask', prefix: 'question', rest: t };
-  }
-
-  // Khusus Nomor Admin WhatsApp: Jika bukan perintah baku di atas, otomatis diteruskan sebagai percakapan santai dengan AI (Opsi 1)
+  // Khusus Nomor Admin WhatsApp: Jika pesan diakhiri tanda tanya '?' atau berupa chat santai, teruskan ke AI
   if (isAdmin) {
+    if (t.endsWith('?') && t.length >= 6) {
+      return { cmd: 'ai_ask', prefix: 'question', rest: t, isAdmin: true };
+    }
     return { cmd: 'ai_ask', prefix: 'admin_chat', rest: t, isAdmin: true };
   }
 
+  // Selain admin (pelanggan): Chat di luar perintah tidak direspons oleh bot agar tidak mengganggu pelanggan
   return null;
 }
 
@@ -1096,7 +1088,6 @@ ${sep}
 🔑 \`ganti sandi\` / \`gantisandi\` _sandi_ — Ubah password (min 8)
 🔄 \`reboot\` — Restart ONU
 🔗 \`daftar\` _tag/nomor_ — Bind nomor WA
-🤖 \`tanya\` _pertanyaan_ — Tanya Asisten AI
 
   ${sep}
   ${footerInfo ? footerInfo : '💡 *Contoh:* `cektagihan`'}`;
@@ -1140,6 +1131,7 @@ ${sep}
 🔄 \`reboot\` _TAG_ — Restart ONU
 📶 \`ganti ssid\` / \`gantissid\` _TAG_ _namaSSID_ — Ubah SSID ONU
 🔑 \`ganti sandi\` / \`gantisandi\` _TAG_ _password_ — Ubah password ONU (min 8)
+🤖 \`tanya\` / \`ai\` _pertanyaan_ — Tanya Asisten AI (atau kirim pertanyaan langsung)
 
 ⚡ *Digiflazz (Admin):*
 ⚡ \`pulsa\` _SKU TARGET_ — Transaksi pulsa/produk
@@ -1939,9 +1931,6 @@ export async function processIncomingCommand({
         }
 
         if (parsed.cmd === 'greeting') {
-          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
-          if (!isAiEnabled) return false;
-
           const { companyHeader } = waBrand();
           const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
           const greetingName = customerContext?.customerName || senderName || '';
@@ -1954,23 +1943,31 @@ export async function processIncomingCommand({
           if (isSalam) {
             salamHeader = `وَعَلَيْكُمُ السَّلاَمُ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ\n\nHalo${nameStr}! 👋 Selamat datang di layanan pelanggan *${companyHeader}*.`;
           } else if (isP) {
-            salamHeader = `وَعَلَيْكُمُ السَّلاَمُ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ\n\nHalo${nameStr}! 👋 Ada yang bisa kami bantu seputar layanan internet *${companyHeader}*?`;
+            salamHeader = `Halo${nameStr}! 👋 Ada yang bisa kami bantu seputar layanan internet *${companyHeader}*?`;
           } else {
             salamHeader = `Halo${nameStr}! 👋 Selamat datang di layanan pelanggan *${companyHeader}*.`;
           }
 
           const replyMsg = `${salamHeader}\n\n` +
             `Ada yang bisa kami bantu seputar layanan internet Anda hari ini?\n\n` +
-            `💡 *Panduan Cepat:*\n` +
-            `• *Tanya Info / Bantuan:* Ketik pertanyaan Anda (akhiri tanda *?* atau awalan *tanya*)\n` +
+            `💡 *Panduan Perintah:*\n` +
             `• *Cek Tagihan:* Ketik \`cektagihan\` atau \`billing\`\n` +
-            `• *Menu Lengkap:* Ketik \`menu\``;
+            `• *Info Modem:* Ketik \`info\`\n` +
+            `• *Ubah WiFi:* Ketik \`ganti ssid\` atau \`ganti sandi\`\n` +
+            `• *Menu Lengkap:* Ketik \`menu\`\n` +
+            `• *Bantuan CS:* Silakan sampaikan pesan/kendala Anda, admin kami akan segera merespons.`;
 
           await reply(replyMsg);
           return true;
         }
 
         if (parsed.cmd === 'ai_ask') {
+          // AI bot HANYA diaktifkan untuk nomor Admin resmi
+          if (!isAdmin) {
+            logger.info(`[WA AI] AI ask diabaikan untuk non-admin (${phone}): "${text}"`);
+            return false;
+          }
+
           const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
           if (!isAiEnabled) {
             await reply('ℹ️ Fitur Asisten AI WhatsApp sedang dinonaktifkan di pengaturan.');
@@ -1978,26 +1975,15 @@ export async function processIncomingCommand({
           }
           const q = parsed.rest;
           if (!q) {
-            if (['billing', 'biling'].includes(parsed.prefix)) {
-              const invoices = phone ? billingSvc.getInvoicesByAny(phone) : null;
-              if (invoices && invoices.length > 0) {
-                await reply(formatCustomerInvoices(invoices, phone));
-                return true;
-              }
-            }
-            await reply('💡 Silakan tulis pertanyaan setelah kata kunci *billing* atau *tanya*.\n\nContoh:\n• *billing berapa tagihan saya?*\n• *tanya cara ganti password wifi*\n• Atau ketik *cektagihan*');
+            await reply('💡 Silakan tulis pertanyaan setelah kata kunci *tanya* atau *ai*.\n\nContoh:\n• *tanya status server*\n• *ai berapa pelanggan yang belum bayar?*');
             return true;
           }
           try {
-            let customerContext = null;
-            if (!isAdmin) {
-              customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
-            }
             const aiReply = await telegramAi.askAi({
               question: q,
-              senderName: isAdmin ? (senderName || 'Admin') : (customerContext?.customerName || senderName || 'Pelanggan'),
-              customerContext,
-              isAdmin: Boolean(isAdmin),
+              senderName: senderName || 'Admin',
+              customerContext: null,
+              isAdmin: true,
               extraContext: { reply, sock: currentSockInstance, lidStore: currentLidStore, phone }
             });
             await reply(aiReply);
