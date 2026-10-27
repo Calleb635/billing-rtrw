@@ -355,10 +355,6 @@ function initTelegram() {
     const isPrivateTrigger = !isGroup && (isAskCommand || !text.startsWith('/'));
 
     if (isGroupTrigger || isPrivateTrigger) {
-      if (!isGroup && !isAdmin(msg)) {
-        // AI hanya aktif untuk Admin di private chat
-        return;
-      }
       const isAiEnabled = getSetting('telegram_group_ai_enabled', true);
       if (!isAiEnabled) {
         if (isAskCommand || isMentioned) {
