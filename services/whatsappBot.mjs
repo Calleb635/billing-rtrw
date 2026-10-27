@@ -2016,9 +2016,9 @@ export async function processIncomingCommand({
               senderName: senderName || (isAdmin ? 'Admin' : 'Pelanggan'),
               customerContext: customerContext,
               isAdmin: Boolean(isAdmin),
-              extraContext: { reply, sock: currentSockInstance, lidStore: currentLidStore, phone }
+              extraContext: { reply: (m) => reply(m, { raw: true }), sock: currentSockInstance, lidStore: currentLidStore, phone }
             });
-            await reply(aiReply);
+            await reply(aiReply, { raw: true });
           } catch (err) {
             logger.error('[WA AI] Error: ' + err.message);
             await reply('❌ Maaf, sedang terjadi kendala memproses jawaban AI.');
@@ -3699,10 +3699,12 @@ export async function startWhatsAppBot() {
           const targetJid = (phone && phone.length >= 8) ? `${phone}@s.whatsapp.net` : remote;
 
           // Pengiriman balasan langsung tanpa quote untuk mencegah isu "Menunggu pesan ini"
-          const reply = async (msg) => {
-            logger.info(`[WA reply] Menyiapkan balasan ke ${targetJid} (dari ${remote}): "${msg.substring(0, 60)}..."`);
+          const reply = async (msg, options = {}) => {
+            logger.info(`[WA reply] Menyiapkan balasan ke ${targetJid} (dari ${remote}): "${String(msg).substring(0, 60)}..."`);
             try {
-              const result = await sock.sendMessage(targetJid, { text: waAutoWrap(msg) });
+              const isRaw = Boolean(options && (options.raw || options.noWrap));
+              const textToSend = isRaw ? String(msg).trim() : waAutoWrap(msg);
+              const result = await sock.sendMessage(targetJid, { text: textToSend });
               if (result && result.key && result.message) {
                 cacheSentMessage(result.key, result.message);
               }

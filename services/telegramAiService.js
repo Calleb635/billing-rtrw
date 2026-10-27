@@ -237,8 +237,12 @@ PEDOMAN UTAMA & ATURAN JAWABAN:
    - Untuk hapus pelanggan: SELALU panggil tool 'delete_customer_request' agar sistem meminta konfirmasi 2 langkah yang aman.
    - Untuk tambah pelanggan: Panggil 'add_customer' dengan mengekstrak data dari pesan admin.
    - Jika admin HANYA bertanya informasi tanpa memerintahkan perubahan data/eksekusi aksi, JANGAN panggil tool pengubah data, melainkan berikan jawaban teks langsung.
-6. FORMAT PENYAJIAN:
-   - Gunakan format teks WhatsApp yang rapi (*bold*, bullet points) agar nyaman dan mudah dibaca di layar chat.
+6. FORMAT PENYAJIAN SEPERTI CHAT NORMAL (TANPA HEADER & TANPA FOOTER):
+   - Jawablah layaknya percakapan chat manusia normal di WhatsApp / Telegram.
+   - DILARANG KERAS menggunakan header/judul formal di awal jawaban (misal: "🏢 RTRW-NET", "🤖 Asisten AI", judul laporan tebal, atau garis pemisah --- / === / ───).
+   - DILARANG KERAS menggunakan footer/penutup template (misal: "Semoga membantu!", "Ada yang bisa saya bantu lagi?", "Salam hangat", atau slogan promosi).
+   - DILARANG menggunakan garis pembatas pemisah di atas atau di bawah teks.
+   - Gunakan gaya bahasa luwes, langsung ke inti jawaban secara ramah dan profesional.
 
 DATA OPERASIONAL LIVE (ADMIN ACCESS):
 ${adminContext || '(Tidak ada data kontekstual khusus)'}
@@ -277,8 +281,11 @@ PEDOMAN UTAMA & ATURAN JAWABAN:
    - Jika berkaitan dengan layanan internet, cara bayar tagihan, cara ganti sandi wifi, cek tagihan, atau troubleshooting jaringan rumah, jawablah dengan panduan praktis yang mengacu pada DOKUMENTASI SISTEM & PANDUAN PEMECAHAN MASALAH di bawah.
 4. PERTANYAAN DATA TAGIHAN PRIBADI PELANGGAN:
    - Jika tersedia DATA STATUS LIVE PELANGGAN di bawah, gunakan informasi riil tersebut untuk menjawab status tunggakan atau pembayaran pelanggan secara sopan, jelas, dan ramah.
-5. FORMAT PENYAJIAN:
-   - Gunakan format teks rapi (*bold*, bullet points), maksimal 2-4 paragraf agar nyaman dibaca di layar chat.
+5. FORMAT PENYAJIAN SEPERTI CHAT NORMAL (TANPA HEADER & TANPA FOOTER):
+   - Jawablah seperti chat personal yang wajar, ramah, dan membantu layaknya CS manusia biasa (chat WhatsApp/Telegram normal).
+   - DILARANG menggunakan header kaku (seperti nama bot, nama brand di awal pesan, atau garis pemisah ─── / ---).
+   - DILARANG menambahkan kalimat footer penutup klise (seperti "Semoga membantu!", "Ada hal lain yang perlu ditanyakan?", "Salam hangat").
+   - Langsung berikan penjelasan atau solusi dengan bahasa yang santun dan mudah dipahami.
 
 ${liveCustomerDataPrompt}
 
@@ -523,21 +530,18 @@ function getOfflineAnswer(question, customerContext = null, isAdmin = false, adm
         `).all();
 
         if (unpaidList.length === 0) {
-          return `🎉 *Laporan Billing Admin (Offline)*\n\nAlhamdulillah, saat ini *tidak ada pelanggan yang menunggak*. Semua tagihan sudah lunas!`;
+          return 'Alhamdulillah, saat ini tidak ada pelanggan yang menunggak. Semua tagihan sudah lunas!';
         }
 
         const totalNominal = unpaidList.reduce((sum, item) => sum + Number(item.total || 0), 0);
-        let resp = `📊 *LAPORAN TUNGGAKAN PELANGGAN (OFFLINE)*\n\n`;
-        resp += `• Total Penunggak: *${unpaidList.length} pelanggan*\n`;
-        resp += `• Total Nominal: *Rp ${totalNominal.toLocaleString('id-ID')}*\n\n`;
-        resp += `*Daftar Pelanggan Menunggak:*\n`;
+        let resp = `Ada *${unpaidList.length} pelanggan* yang menunggak dengan total nominal *Rp ${totalNominal.toLocaleString('id-ID')}*.\n\nRincian pelanggan:\n`;
         unpaidList.slice(0, 15).forEach((c, idx) => {
           resp += `${idx + 1}. *${c.name}* (${c.phone || '-'}) - Rp ${Number(c.total).toLocaleString('id-ID')} [${c.count} tagihan]\n`;
         });
         if (unpaidList.length > 15) {
-          resp += `\n_...dan ${unpaidList.length - 15} pelanggan lainnya._`;
+          resp += `\n...dan ${unpaidList.length - 15} pelanggan lainnya.`;
         }
-        return resp;
+        return resp.trim();
       }
 
       // 2. Cek pertanyaan isolir / terisolir / putus
@@ -550,14 +554,14 @@ function getOfflineAnswer(question, customerContext = null, isAdmin = false, adm
         `).all();
 
         if (isolatedList.length === 0) {
-          return `✅ *Laporan Status Isolir (Offline)*\n\nSaat ini *tidak ada pelanggan yang sedang terisolir*. Semua pelanggan dalam status aktif/normal.`;
+          return 'Saat ini tidak ada pelanggan yang sedang terisolir. Semua pelanggan dalam status aktif/normal.';
         }
 
-        let resp = `🔒 *DAFTAR PELANGGAN TERISOLIR (Total: ${isolatedList.length})*\n\n`;
+        let resp = `Saat ini ada *${isolatedList.length} pelanggan* yang sedang terisolir:\n\n`;
         isolatedList.forEach((c, idx) => {
           resp += `${idx + 1}. *${c.name}* | PPPoE: \`${c.pppoe_username || '-'}\` | Area: ${c.area || '-'}\n`;
         });
-        return resp;
+        return resp.trim();
       }
 
       // 3. Cek total / ringkasan / rekap
@@ -571,7 +575,7 @@ function getOfflineAnswer(question, customerContext = null, isAdmin = false, adm
           FROM customers
         `).get();
 
-        return `📊 *RINGKASAN PELANGGAN (OFFLINE)*\n\n` +
+        return `Ringkasan status pelanggan saat ini:\n\n` +
           `• Total Terdaftar: *${stats.total} pelanggan*\n` +
           `• Aktif: *${stats.active} pelanggan*\n` +
           `• Terisolir: *${stats.isolated} pelanggan*\n` +
@@ -762,16 +766,37 @@ function getOfflineAnswer(question, customerContext = null, isAdmin = false, adm
   }
 
   // Jawaban standar jika belum ada keyword yang cocok
-  return `🤖 *Asisten RTRWNET Management & Billing System*\n\n` +
-    `Saya dapat membantu menjawab berbagai pertanyaan seputar aplikasi ini:\n` +
-    `• *Billing & Invoicing:* Auto invoice, denda, auto isolir & unisolir\n` +
-    `• *MikroTik:* Multi-router, PPPoE secret, Hotspot Mikhmon\n` +
-    `• *GenieACS (TR-069):* Cek redaman, reboot ONU, ganti WiFi\n` +
-    `• *OLT (SNMP):* Monitoring port PON, uncfg ONU (EPON/GPON)\n` +
-    `• *Payment Gateway:* Tripay, Midtrans, Xendit, Duitku, QRIS\n` +
-    `• *WhatsApp:* Notifikasi invoice otomatis, broadcast, chatbot Baileys\n` +
-    `• *Portal Pelanggan:* Self-service WiFi, cek tagihan, tiket support\n\n` +
-    `_💡 Coba tanyakan spesifik, misal: "Bagaimana cara isolir otomatis?" atau "Apakah support multi router?"_`;
+  return `Ada yang bisa saya bantu seputar billing, tagihan, mikrotik, atau status modem ONU? Silakan tanyakan langsung apa yang ingin Anda ketahui.`;
+}
+
+/**
+ * Membersihkan jawaban AI agar tampil seperti chat normal (tanpa header/footer formal)
+ */
+function cleanAiResponse(text) {
+  if (!text || typeof text !== 'string') return '';
+  let cleaned = text.trim();
+
+  // 1. Hapus pembungkus code block markdown jika membungkus seluruh pesan
+  if (cleaned.startsWith('```') && cleaned.endsWith('```')) {
+    cleaned = cleaned.replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim();
+  }
+
+  // 2. Hapus header garis / separator di paling atas atau paling bawah
+  cleaned = cleaned.replace(/^[─—\-_=]{3,}\s*/g, '');
+  cleaned = cleaned.replace(/\s*[─—\-_=]{3,}$/g, '');
+
+  // 3. Hapus header perusahaan atau nama bot di awal chat
+  cleaned = cleaned.replace(/^(?:🏢|🤖|🌐|💬)?\s*\*?(?:ALIJAYA|AliJaya|RTRWNET|RTRW-?Net|Asisten AI|Asisten Virtual|Bot Billing|Portal Billing)[^\n*]*\*?\n+[─—\-_=]{3,}\n*/gi, '');
+  cleaned = cleaned.replace(/^(?:🏢|🤖|🌐|💬)?\s*\*?(?:ALIJAYA|AliJaya|RTRWNET|RTRW-?Net|Asisten AI|Asisten Virtual)[^\n*]*\*?\n+/gi, '');
+
+  // 4. Hapus footer template atau slogan perusahaan di akhir chat
+  cleaned = cleaned.replace(/\n+[─—\-_=]{3,}\n+.*(?:Internet Tanpa Batas|AliJaya|ALIJAYA|Semoga membantu|Ada yang bisa dibantu lagi).*$/gi, '');
+  cleaned = cleaned.replace(/\n+[─—\-_=]{3,}\s*$/g, '');
+
+  // 5. Hapus kalimat penutup klise jika berdiri sendiri di baris paling akhir
+  cleaned = cleaned.replace(/\n+(?:Semoga membantu!?|Semoga informasinya bermanfaat!?|Ada yang bisa dibantu lagi\??|Ada hal lain yang perlu ditanyakan\??|Salam hangat,?[^\n]*)$/gi, '');
+
+  return cleaned.trim();
 }
 
 /**
@@ -864,16 +889,16 @@ async function askAi({ question, senderName, customerContext = null, isAdmin = f
   if (aiReply) {
     if (typeof aiReply === 'object' && aiReply?.type === 'function_call') {
       const toolResult = await executeAdminTool(aiReply.functionCall.name, aiReply.functionCall.args, extraContext);
-      return toolResult;
+      return cleanAiResponse(toolResult);
     }
     if (typeof aiReply === 'object' && aiReply?.type === 'text') {
-      return aiReply.text;
+      return cleanAiResponse(aiReply.text);
     }
-    return typeof aiReply === 'string' ? aiReply : (aiReply?.text || JSON.stringify(aiReply));
+    return cleanAiResponse(typeof aiReply === 'string' ? aiReply : (aiReply?.text || JSON.stringify(aiReply)));
   }
 
   // Jika API key belum diatur atau semua panggilan API gagal, gunakan offline knowledge base
-  return getOfflineAnswer(cleanQ, customerContext, isAdmin, adminContext);
+  return cleanAiResponse(getOfflineAnswer(cleanQ, customerContext, isAdmin, adminContext));
 }
 
 /**
@@ -933,6 +958,7 @@ async function checkPing(host) {
 
 module.exports = {
   askAi,
+  cleanAiResponse,
   checkDns,
   checkPing,
   getOfflineAnswer,
