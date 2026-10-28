@@ -407,7 +407,28 @@ async function resolveCustomerContext(key, lidStore) {
   if (!billingKey && customer && customer.phone) billingKey = String(customer.phone);
   if (!billingKey && cached && /^\d+$/.test(String(cached))) billingKey = String(cached);
 
+  // Kumpulkan kandidat device token dari profil customer & WA context
+  const candidates = Array.from(new Set([
+    customer?.pppoe_username,
+    customer?.genieacs_tag,
+    customer?.mac_address,
+    cached,
+    digits
+  ].map(v => String(v || '').trim()).filter(Boolean)));
+
+  let resolvedDeviceKey = null;
+  for (const cand of candidates) {
+    try {
+      const dev = await customerDevice.resolveDeviceToken(cand);
+      if (dev && dev._id) {
+        resolvedDeviceKey = cand;
+        break;
+      }
+    } catch (_) {}
+  }
+
   let deviceKey =
+    resolvedDeviceKey ||
     (customer && (customer.genieacs_tag || customer.pppoe_username) ? (customer.genieacs_tag || customer.pppoe_username) : null) ||
     cached ||
     digits ||
@@ -416,14 +437,14 @@ async function resolveCustomerContext(key, lidStore) {
   if (!deviceKey) return null;
 
   if (digits && lidStore) {
-    const tagToCache = (customer && (customer.genieacs_tag || customer.pppoe_username)) ? (customer.genieacs_tag || customer.pppoe_username) : deviceKey;
+    const tagToCache = resolvedDeviceKey || (customer && (customer.genieacs_tag || customer.pppoe_username)) || deviceKey;
     const pnJid = senderPn && senderPn.endsWith('@s.whatsapp.net') ? senderPn : (remoteJid.endsWith('@s.whatsapp.net') ? remoteJid : null);
     const lidJid = remoteJid.endsWith('@lid') ? remoteJid : (senderLid && senderLid.endsWith('@lid') ? senderLid : null);
     if (pnJid) lidStore.set(pnJid, tagToCache);
     if (lidJid) lidStore.set(lidJid, tagToCache);
   }
 
-  return { billingKey: billingKey || deviceKey, deviceKey, customer };
+  return { billingKey: billingKey || deviceKey, deviceKey, customer, deviceCandidates: candidates };
 }
 
 async function getCustomerBillingSummary(msgKey, currentLidStore, phone) {
@@ -603,7 +624,15 @@ function getWhatsappAdminNumbers() {
     if (raw) dbAdmin = parseNumbers(raw);
   } catch (e) {}
 
-  const combined = Array.from(new Set([...primary, ...legacy, ...companyPhone, ...dbAdmin]));
+  let techNumbers = [];
+  try {
+    const activeTechs = db.prepare('SELECT phone FROM technicians WHERE is_active = 1').all();
+    if (Array.isArray(activeTechs)) {
+      techNumbers = activeTechs.map(t => String(t.phone || '').trim()).filter(Boolean);
+    }
+  } catch (e) {}
+
+  const combined = Array.from(new Set([...primary, ...legacy, ...companyPhone, ...dbAdmin, ...techNumbers]));
   return combined;
 }
 
@@ -687,7 +716,7 @@ function isWhatsappAdminKey(key, adminSet, sock, lidStore) {
   return false;
 }
 
-function parseCommand(text, isAdmin) {
+export function parseCommand(text, isAdmin) {
   const t = String(text || '').trim();
   if (!t) return null;
   const parts = t.split(/\s+/);
@@ -696,6 +725,12 @@ function parseCommand(text, isAdmin) {
   const cmd = cleanFirst.toLowerCase();
   const rest = t.slice(rawFirst.length).trim();
 
+  // Mode AI WhatsApp: 'admin_only' (default/rekomendasi), true (semua), atau false (nonaktif)
+  const aiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+  const isAiCompletelyOff = (aiMode === false || aiMode === 'false');
+  const isCustomerAiAllowed = !isAiCompletelyOff && (aiMode === true || aiMode === 'true' || aiMode === 'all');
+  const isAdminAiAllowed = !isAiCompletelyOff;
+
   if (['menu', 'bantuan', 'help'].includes(cmd)) return { cmd: 'menu', rest: '' };
 
   // Deteksi ping / salam pembuka: 'p', 'p.', 'assalamualaikum', 'halo', 'hai', 'selamat pagi/siang/sore/malam' (Hanya jika salam murni tanpa pertanyaan lanjutan)
@@ -703,16 +738,14 @@ function parseCommand(text, isAdmin) {
     return { cmd: 'greeting', raw: t };
   }
 
-  if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
-    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
-  }
-
-  if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
-    return { cmd: 'agent_saldo' };
-  }
-
-  if (['tanya', 'ai', 'ask', 'konsultasi', 'billing', 'biling', 'bot'].includes(cmd)) {
-    return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : '') };
+  // Perintah AI Asisten
+  if (['tanya', 'ai', 'ask', 'konsultasi', 'bot'].includes(cmd)) {
+    if (isAdmin && isAdminAiAllowed) {
+      return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : ''), isAdmin: true };
+    }
+    if (!isAdmin && isCustomerAiAllowed) {
+      return { cmd: 'ai_ask', prefix: cmd, rest: rest || (parts.length >= 2 ? parts.slice(1).join(' ') : ''), isAdmin: false };
+    }
   }
 
   if (['saldo', 'ceksaldo', 'saldomenu', 'mysaldo'].includes(cmd)) {
@@ -772,11 +805,52 @@ function parseCommand(text, isAdmin) {
   if (isAdmin && (cmd === 'reboot' || cmd === 'restartonu') && parts.length >= 2) {
     return { cmd: 'reboot', admin: true, targetTag: parts[1] };
   }
-  if (isAdmin && cmd === 'gantissid' && parts.length >= 3) {
-    return { cmd: 'gantissid', admin: true, targetTag: parts[1], rest: parts.slice(2).join(' ') };
+  // Deteksi Perintah Ubah SSID & Password (baik satu kata maupun dua kata terpisah)
+  const isGantiOrUbah = ['ganti', 'ubah', 'set', 'rubah'].includes(cmd);
+  const secondWord = parts.length >= 2 ? parts[1].toLowerCase() : '';
+  const isSsidMulti = isGantiOrUbah && ['ssid', 'wifi', 'namawifi', 'wlan'].includes(secondWord);
+  const isPassMulti = isGantiOrUbah && ['sandi', 'password', 'pass', 'pwd'].includes(secondWord);
+  const isSsidSingle = ['gantissid', 'ubahssid', 'gantiwifi', 'ubahwifi', 'setssid', 'setwifi'].includes(cmd);
+  const isPassSingle = ['gantisandi', 'ubahsandi', 'gantipassword', 'ubahpassword', 'gantipass', 'ubahpass', 'setsandi', 'setpassword'].includes(cmd);
+
+  if (isSsidMulti || isSsidSingle) {
+    if (isAdmin) {
+      if (isSsidMulti) {
+        if (parts.length >= 4) {
+          return { cmd: 'gantissid', admin: true, targetTag: parts[2], rest: parts.slice(3).join(' ') };
+        } else if (parts.length === 3) {
+          return { cmd: 'gantissid', admin: true, targetTag: parts[2], rest: '' };
+        }
+      } else {
+        if (parts.length >= 3) {
+          return { cmd: 'gantissid', admin: true, targetTag: parts[1], rest: parts.slice(2).join(' ') };
+        } else if (parts.length === 2) {
+          return { cmd: 'gantissid', admin: true, targetTag: parts[1], rest: '' };
+        }
+      }
+    }
+    const newSsid = isSsidMulti ? parts.slice(2).join(' ') : rest;
+    return { cmd: 'gantissid', rest: newSsid };
   }
-  if (isAdmin && cmd === 'gantisandi' && parts.length >= 3) {
-    return { cmd: 'gantisandi', admin: true, targetTag: parts[1], rest: parts.slice(2).join(' ') };
+
+  if (isPassMulti || isPassSingle) {
+    if (isAdmin) {
+      if (isPassMulti) {
+        if (parts.length >= 4) {
+          return { cmd: 'gantisandi', admin: true, targetTag: parts[2], rest: parts.slice(3).join(' ') };
+        } else if (parts.length === 3) {
+          return { cmd: 'gantisandi', admin: true, targetTag: parts[2], rest: '' };
+        }
+      } else {
+        if (parts.length >= 3) {
+          return { cmd: 'gantisandi', admin: true, targetTag: parts[1], rest: parts.slice(2).join(' ') };
+        } else if (parts.length === 2) {
+          return { cmd: 'gantisandi', admin: true, targetTag: parts[1], rest: '' };
+        }
+      }
+    }
+    const newPass = isPassMulti ? parts.slice(2).join(' ') : rest;
+    return { cmd: 'gantisandi', rest: newPass };
   }
 
   if (['pulsa', 'belipulsa'].includes(cmd) && parts.length >= 3) {
@@ -788,24 +862,28 @@ function parseCommand(text, isAdmin) {
   }
 
   // Customer Commands
-  if (['cektagihan', 'tagihan', 'cek_tagihan', 'bill', 'invoicewa'].includes(cmd)) return { cmd: 'cektagihan', rest: '' };
+  if (['cektagihan', 'tagihan', 'cek_tagihan', 'bill', 'billing', 'biling', 'invoicewa'].includes(cmd)) return { cmd: 'cektagihan', rest: '' };
   if (['info', 'cekstatus', 'cekonu', 'statusonu', 'status'].includes(cmd)) return { cmd: 'info', rest: '' };
   if (cmd === 'cekterhubung') return { cmd: 'cekterhubung', rest: '' };
-  if (cmd === 'gantissid') return { cmd: 'gantissid', rest };
-  if (cmd === 'gantisandi') return { cmd: 'gantisandi', rest };
   if (cmd === 'daftar') return { cmd: 'daftar', rest };
   if (cmd === 'reboot' || cmd === 'restartonu') return { cmd: 'reboot', rest: '' };
 
-  // Otomatis respon AI jika pesan diakhiri tanda tanya '?' (minimal 6 karakter)
+  // Pertanyaan yang diakhiri tanda tanya '?' (minimal 6 karakter)
   if (t.endsWith('?') && t.length >= 6) {
-    return { cmd: 'ai_ask', prefix: 'question', rest: t };
+    if (isAdmin && isAdminAiAllowed) {
+      return { cmd: 'ai_ask', prefix: 'question', rest: t, isAdmin: true };
+    }
+    if (!isAdmin && isCustomerAiAllowed) {
+      return { cmd: 'ai_ask', prefix: 'question', rest: t, isAdmin: false };
+    }
   }
 
-  // Khusus Nomor Admin WhatsApp: Jika bukan perintah baku di atas, otomatis diteruskan sebagai percakapan santai dengan AI (Opsi 1)
-  if (isAdmin) {
+  // Khusus Nomor Admin WhatsApp: Jika bukan perintah di atas dan AI diizinkan, teruskan chat santai ke AI
+  if (isAdmin && isAdminAiAllowed) {
     return { cmd: 'ai_ask', prefix: 'admin_chat', rest: t, isAdmin: true };
   }
 
+  // Selain admin (pelanggan): Chat biasa di luar perintah tidak direspons oleh bot agar tidak mengganggu pelanggan & CS leluasa membalas
   return null;
 }
 
@@ -814,7 +892,23 @@ async function resolveTargetTagForAdmin(tagToken) {
 
   // 1. Coba cari di database billing dulu (by name, pppoe, phone, etc)
   const cust = customerSvc.findCustomerByAny(tagToken);
-  if (cust) return cust.genieacs_tag || cust.pppoe_username || cust.phone || tagToken;
+  if (cust) {
+    const candidates = Array.from(new Set([
+      cust.pppoe_username,
+      cust.genieacs_tag,
+      cust.mac_address,
+      cust.phone,
+      tagToken
+    ].map(v => String(v || '').trim()).filter(Boolean)));
+
+    for (const cand of candidates) {
+      try {
+        const dev = await customerDevice.resolveDeviceToken(cand);
+        if (dev && dev._id) return cand;
+      } catch (_) {}
+    }
+    return cust.genieacs_tag || cust.pppoe_username || cust.phone || tagToken;
+  }
 
   return tagToken;
 }
@@ -997,6 +1091,10 @@ async function notifyCustomer(sock, lidStore, tag, message) {
 
 function getMenuText() {
   const { companyHeader, footerInfo, sep } = waBrand();
+  const aiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+  const isCustomerAiAllowed = (aiMode === true || aiMode === 'true' || aiMode === 'all');
+  const aiLine = isCustomerAiAllowed ? `🤖 \`tanya\` _pertanyaan_ — Tanya Asisten AI\n` : '';
+
   return `📱 *MENU PELANGGAN*
 ${sep}
 🏢 *${companyHeader}*
@@ -1008,12 +1106,11 @@ ${sep}
 📡 \`info\` / \`cekstatus\` — Status ONU Anda
 💳 \`cektagihan\` — Lihat status tagihan
 👥 \`cekterhubung\` — Daftar host terhubung
-📶 \`gantissid\` _nama_ — Ubah nama WiFi
-🔑 \`gantisandi\` _sandi_ — Ubah password
+📶 \`ganti ssid\` / \`gantissid\` _nama_ — Ubah nama WiFi
+🔑 \`ganti sandi\` / \`gantisandi\` _sandi_ — Ubah password (min 8)
 🔄 \`reboot\` — Restart ONU
 🔗 \`daftar\` _tag/nomor_ — Bind nomor WA
-🤖 \`tanya\` _pertanyaan_ — Tanya Asisten AI
-
+${aiLine}
   ${sep}
   ${footerInfo ? footerInfo : '💡 *Contoh:* `cektagihan`'}`;
 }
@@ -1054,8 +1151,9 @@ ${sep}
 📋 \`listonu\` — Daftar semua ONU
 📡 \`info\` / \`cekstatus\` _TAG_ — Status ONU
 🔄 \`reboot\` _TAG_ — Restart ONU
-📶 \`gantissid\` _TAG_ _namaSSID_ — Ubah SSID ONU
-🔑 \`gantisandi\` _TAG_ _password_ — Ubah password ONU (min 8)
+📶 \`ganti ssid\` / \`gantissid\` _TAG_ _namaSSID_ — Ubah SSID ONU
+🔑 \`ganti sandi\` / \`gantisandi\` _TAG_ _password_ — Ubah password ONU (min 8)
+🤖 \`tanya\` / \`ai\` _pertanyaan_ — Tanya Asisten AI (atau kirim pertanyaan langsung)
 
 ⚡ *Digiflazz (Admin):*
 ⚡ \`pulsa\` _SKU TARGET_ — Transaksi pulsa/produk
@@ -1855,9 +1953,6 @@ export async function processIncomingCommand({
         }
 
         if (parsed.cmd === 'greeting') {
-          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
-          if (!isAiEnabled) return false;
-
           const { companyHeader } = waBrand();
           const customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
           const greetingName = customerContext?.customerName || senderName || '';
@@ -1870,38 +1965,44 @@ export async function processIncomingCommand({
           if (isSalam) {
             salamHeader = `وَعَلَيْكُمُ السَّلاَمُ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ\n\nHalo${nameStr}! 👋 Selamat datang di layanan pelanggan *${companyHeader}*.`;
           } else if (isP) {
-            salamHeader = `وَعَلَيْكُمُ السَّلاَمُ وَرَحْمَةُ اللهِ وَبَرَكَاتُهُ\n\nHalo${nameStr}! 👋 Ada yang bisa kami bantu seputar layanan internet *${companyHeader}*?`;
+            salamHeader = `Halo${nameStr}! 👋 Ada yang bisa kami bantu seputar layanan internet *${companyHeader}*?`;
           } else {
             salamHeader = `Halo${nameStr}! 👋 Selamat datang di layanan pelanggan *${companyHeader}*.`;
           }
 
           const replyMsg = `${salamHeader}\n\n` +
             `Ada yang bisa kami bantu seputar layanan internet Anda hari ini?\n\n` +
-            `💡 *Panduan Cepat:*\n` +
-            `• *Tanya Info / Bantuan:* Ketik pertanyaan Anda (akhiri tanda *?* atau awalan *tanya*)\n` +
+            `💡 *Panduan Perintah:*\n` +
             `• *Cek Tagihan:* Ketik \`cektagihan\` atau \`billing\`\n` +
-            `• *Menu Lengkap:* Ketik \`menu\``;
+            `• *Info Modem:* Ketik \`info\`\n` +
+            `• *Ubah WiFi:* Ketik \`ganti ssid\` atau \`ganti sandi\`\n` +
+            `• *Menu Lengkap:* Ketik \`menu\`\n` +
+            `• *Bantuan CS:* Silakan sampaikan pesan/kendala Anda, admin kami akan segera merespons.`;
 
           await reply(replyMsg);
           return true;
         }
 
         if (parsed.cmd === 'ai_ask') {
-          const isAiEnabled = getSetting('whatsapp_ai_enabled', true);
-          if (!isAiEnabled) {
-            await reply('ℹ️ Fitur Asisten AI WhatsApp sedang dinonaktifkan di pengaturan.');
-            return true;
+          const aiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+          const isAiCompletelyOff = (aiMode === false || aiMode === 'false');
+          const isCustomerAiAllowed = !isAiCompletelyOff && (aiMode === true || aiMode === 'true' || aiMode === 'all');
+
+          if (isAiCompletelyOff) {
+            if (isAdmin) {
+              await reply('ℹ️ Fitur Asisten AI WhatsApp sedang dinonaktifkan di pengaturan.');
+            }
+            return false;
           }
+
+          if (!isAdmin && !isCustomerAiAllowed) {
+            logger.info(`[WA AI] AI ask diabaikan untuk non-admin (${phone}): "${text}"`);
+            return false;
+          }
+
           const q = parsed.rest;
           if (!q) {
-            if (['billing', 'biling'].includes(parsed.prefix)) {
-              const invoices = phone ? billingSvc.getInvoicesByAny(phone) : null;
-              if (invoices && invoices.length > 0) {
-                await reply(formatCustomerInvoices(invoices, phone));
-                return true;
-              }
-            }
-            await reply('💡 Silakan tulis pertanyaan setelah kata kunci *billing* atau *tanya*.\n\nContoh:\n• *billing berapa tagihan saya?*\n• *tanya cara ganti password wifi*\n• Atau ketik *cektagihan*');
+            await reply('💡 Silakan tulis pertanyaan setelah kata kunci *tanya* atau *ai*.\n\nContoh:\n• *tanya status server*\n• *ai berapa pelanggan yang belum bayar?*');
             return true;
           }
           try {
@@ -1909,14 +2010,15 @@ export async function processIncomingCommand({
             if (!isAdmin) {
               customerContext = await getCustomerBillingSummary(msgKey, currentLidStore, phone);
             }
+
             const aiReply = await telegramAi.askAi({
               question: q,
-              senderName: isAdmin ? (senderName || 'Admin') : (customerContext?.customerName || senderName || 'Pelanggan'),
-              customerContext,
+              senderName: senderName || (isAdmin ? 'Admin' : 'Pelanggan'),
+              customerContext: customerContext,
               isAdmin: Boolean(isAdmin),
-              extraContext: { reply, sock: currentSockInstance, lidStore: currentLidStore, phone }
+              extraContext: { reply: (m) => reply(m, { raw: true }), sock: currentSockInstance, lidStore: currentLidStore, phone }
             });
-            await reply(aiReply);
+            await reply(aiReply, { raw: true });
           } catch (err) {
             logger.error('[WA AI] Error: ' + err.message);
             await reply('❌ Maaf, sedang terjadi kendala memproses jawaban AI.');
@@ -3243,28 +3345,44 @@ export async function processIncomingCommand({
         }
 
         if (parsed.cmd === 'info') {
-          const data = await customerDevice.getCustomerDeviceData(ctx.deviceKey);
+          const candidates = ctx.deviceCandidates || [ctx.deviceKey];
+          let data = null;
+          for (const cand of candidates) {
+            data = await customerDevice.getCustomerDeviceData(cand);
+            if (data && data.status !== 'Tidak ditemukan') break;
+          }
           await reply(formatInfo(data));
           return true;
         }
 
         if (parsed.cmd === 'cekterhubung') {
-          const data = await customerDevice.getCustomerDeviceData(ctx.deviceKey);
+          const candidates = ctx.deviceCandidates || [ctx.deviceKey];
+          let data = null;
+          for (const cand of candidates) {
+            data = await customerDevice.getCustomerDeviceData(cand);
+            if (data && data.status !== 'Tidak ditemukan') break;
+          }
           await reply(formatCekTerhubung(data));
           return true;
         }
 
         if (parsed.cmd === 'gantissid') {
           if (!parsed.rest) {
-            await reply('❌ Format salah. Gunakan:\n\n\`gantissid NamaWiFiBaru\`');
+            await reply('❌ Format salah. Gunakan:\n\n\`gantissid NamaWiFiBaru\` atau \`ganti ssid NamaWiFiBaru\`');
             return true;
           }
-          const ok = await customerDevice.updateSSID(ctx.deviceKey, parsed.rest);
+          const candidates = ctx.deviceCandidates || [ctx.deviceKey];
+          let ok = false;
+          let usedToken = ctx.deviceKey;
+          for (const cand of candidates) {
+            ok = await customerDevice.updateSSID(cand, parsed.rest);
+            if (ok) { usedToken = cand; break; }
+          }
           if (ok) {
             await reply(`✅ SSID berhasil diubah menjadi:\n\n📶 *${parsed.rest}*`);
             // Kirim notifikasi konfirmasi ke pelanggan via WA
             try {
-              const cust = customerSvc.findCustomerByAny(ctx.billingKey || ctx.deviceKey);
+              const cust = customerSvc.findCustomerByAny(ctx.billingKey || usedToken);
               if (cust && cust.phone) {
                 const now = getNowLocal();
                 const notifMsg =
@@ -3275,26 +3393,32 @@ export async function processIncomingCommand({
                   `📡 *${parsed.rest}*\n\n` +
                   `Silakan pilih SSID baru di perangkat Anda untuk terhubung.\n` +
                   `⚠️ Jangan bagikan info ini ke orang lain.`;
-                await notifyCustomer(currentSockInstance, currentLidStore, ctx.deviceKey, notifMsg);
+                await notifyCustomer(currentSockInstance, currentLidStore, usedToken, notifMsg);
               }
             } catch (e) { /* ignore notification errors */ }
           } else {
-            await reply('❌ Gagal mengubah SSID. Coba lagi atau hubungi admin.');
+            await reply('❌ Gagal mengubah SSID. Pastikan modem aktif atau hubungi admin.');
           }
           return true;
         }
 
         if (parsed.cmd === 'gantisandi') {
           if (!parsed.rest || parsed.rest.length < 8) {
-            await reply('❌ Format salah. Gunakan:\n\n\`gantisandi sandibarumin8huruf\`\n\nSandi minimal 8 karakter.');
+            await reply('❌ Format salah. Gunakan:\n\n\`gantisandi sandibarumin8huruf\` atau \`ganti password sandibarumin8huruf\`\n\nSandi minimal 8 karakter.');
             return true;
           }
-          const ok = await customerDevice.updatePassword(ctx.deviceKey, parsed.rest);
+          const candidates = ctx.deviceCandidates || [ctx.deviceKey];
+          let ok = false;
+          let usedToken = ctx.deviceKey;
+          for (const cand of candidates) {
+            ok = await customerDevice.updatePassword(cand, parsed.rest);
+            if (ok) { usedToken = cand; break; }
+          }
           if (ok) {
             await reply('✅ Password WiFi berhasil diubah.');
             // Kirim notifikasi konfirmasi ke pelanggan via WA
             try {
-              const cust = customerSvc.findCustomerByAny(ctx.billingKey || ctx.deviceKey);
+              const cust = customerSvc.findCustomerByAny(ctx.billingKey || usedToken);
               if (cust && cust.phone) {
                 const now = getNowLocal();
                 const notifMsg =
@@ -3305,18 +3429,24 @@ export async function processIncomingCommand({
                   `🔐 *${parsed.rest}*\n\n` +
                   `Silakan gunakan password baru untuk terhubung.\n` +
                   `⚠️ Jangan bagikan password ini ke orang lain.`;
-                await notifyCustomer(currentSockInstance, currentLidStore, ctx.deviceKey, notifMsg);
+                await notifyCustomer(currentSockInstance, currentLidStore, usedToken, notifMsg);
               }
             } catch (e) { /* ignore notification errors */ }
           } else {
-            await reply('❌ Gagal mengubah password.');
+            await reply('❌ Gagal mengubah password. Pastikan modem aktif atau hubungi admin.');
           }
           return true;
         }
 
         if (parsed.cmd === 'reboot') {
-          const r = await customerDevice.requestReboot(ctx.deviceKey);
-          await reply(`🔄 *Reboot ONU*\n\n${r.message}`);
+          const candidates = ctx.deviceCandidates || [ctx.deviceKey];
+          let r = null;
+          for (const cand of candidates) {
+            r = await customerDevice.requestReboot(cand);
+            if (r && r.ok) break;
+          }
+          await reply(`🔄 *Reboot ONU*\n\n${r?.message || 'Perintah reboot telah dikirim.'}`);
+          return true;
         }
 
   return true;
@@ -3569,10 +3699,12 @@ export async function startWhatsAppBot() {
           const targetJid = (phone && phone.length >= 8) ? `${phone}@s.whatsapp.net` : remote;
 
           // Pengiriman balasan langsung tanpa quote untuk mencegah isu "Menunggu pesan ini"
-          const reply = async (msg) => {
-            logger.info(`[WA reply] Menyiapkan balasan ke ${targetJid} (dari ${remote}): "${msg.substring(0, 60)}..."`);
+          const reply = async (msg, options = {}) => {
+            logger.info(`[WA reply] Menyiapkan balasan ke ${targetJid} (dari ${remote}): "${String(msg).substring(0, 60)}..."`);
             try {
-              const result = await sock.sendMessage(targetJid, { text: waAutoWrap(msg) });
+              const isRaw = Boolean(options && (options.raw || options.noWrap));
+              const textToSend = isRaw ? String(msg).trim() : waAutoWrap(msg);
+              const result = await sock.sendMessage(targetJid, { text: textToSend });
               if (result && result.key && result.message) {
                 cacheSentMessage(result.key, result.message);
               }

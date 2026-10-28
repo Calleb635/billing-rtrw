@@ -4227,9 +4227,30 @@ router.post('/settings', requireAdminSession, express.urlencoded({ extended: tru
     newSettings.telegram_enabled = (newSettings.telegram_enabled === 'true');
     newSettings.telegram_group_ai_enabled = (newSettings.telegram_group_ai_enabled === 'true');
     newSettings.telegram_welcome_enabled = (newSettings.telegram_welcome_enabled === 'true');
-    newSettings.whatsapp_ai_enabled = (newSettings.whatsapp_ai_enabled === 'true');
+    if (newSettings.whatsapp_ai_enabled === 'admin_only') {
+      newSettings.whatsapp_ai_enabled = 'admin_only';
+    } else if (newSettings.whatsapp_ai_enabled === 'true' || newSettings.whatsapp_ai_enabled === true) {
+      newSettings.whatsapp_ai_enabled = true;
+    } else {
+      newSettings.whatsapp_ai_enabled = false;
+    }
     newSettings.auto_backup_enabled = (newSettings.auto_backup_enabled === 'true');
     newSettings.use_builtin_acs = (newSettings.use_builtin_acs === 'true' || newSettings.use_builtin_acs === true);
+
+    // AI Provider & API Settings
+    if (newSettings.ai_provider) newSettings.ai_provider = String(newSettings.ai_provider).trim().toLowerCase();
+    if (newSettings.gemini_api_key) newSettings.gemini_api_key = String(newSettings.gemini_api_key).trim();
+    if (newSettings.openai_api_key) newSettings.openai_api_key = String(newSettings.openai_api_key).trim();
+    if (newSettings.openai_model) newSettings.openai_model = String(newSettings.openai_model).trim();
+    if (newSettings.deepseek_api_key) newSettings.deepseek_api_key = String(newSettings.deepseek_api_key).trim();
+    if (newSettings.deepseek_model) newSettings.deepseek_model = String(newSettings.deepseek_model).trim();
+    if (newSettings.groq_api_key) newSettings.groq_api_key = String(newSettings.groq_api_key).trim();
+    if (newSettings.groq_model) newSettings.groq_model = String(newSettings.groq_model).trim();
+    if (newSettings.openrouter_api_key) newSettings.openrouter_api_key = String(newSettings.openrouter_api_key).trim();
+    if (newSettings.openrouter_model) newSettings.openrouter_model = String(newSettings.openrouter_model).trim();
+    if (newSettings.custom_ai_api_key) newSettings.custom_ai_api_key = String(newSettings.custom_ai_api_key).trim();
+    if (newSettings.custom_ai_base_url) newSettings.custom_ai_base_url = String(newSettings.custom_ai_base_url).trim();
+    if (newSettings.custom_ai_model) newSettings.custom_ai_model = String(newSettings.custom_ai_model).trim();
 
     // Multi-Router Mode settings
     if (!newSettings.multi_router_mode) newSettings.multi_router_mode = 'disabled';
@@ -5841,6 +5862,8 @@ router.get('/whatsapp', requireAdminSession, requireSidebarMenuAccess('whatsapp'
     fonnte_country_code: getSetting('fonnte_country_code', '62')
   };
 
+  const whatsappAiMode = getSetting('whatsapp_ai_enabled', 'admin_only');
+
   res.render('admin/whatsapp', {
     title: 'Status WhatsApp',
     company: company(),
@@ -5849,6 +5872,7 @@ router.get('/whatsapp', requireAdminSession, requireSidebarMenuAccess('whatsapp'
     waGatewayType,
     metaSettings,
     fonnteSettings,
+    whatsappAiMode,
     host: req.get('host') || 'localhost:3001'
   });
 });
@@ -5888,6 +5912,28 @@ router.post('/whatsapp/gateway-settings', requireAdminSession, express.urlencode
     req.session._msg = { type: 'success', text: 'Pengaturan WhatsApp Gateway (Baileys / Fonnte / Meta) berhasil disimpan.' };
   } catch (e) {
     req.session._msg = { type: 'danger', text: 'Gagal menyimpan pengaturan: ' + e.message };
+  }
+  res.redirect('/admin/whatsapp');
+});
+
+router.post('/whatsapp/ai-settings', requireAdminSession, express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    const { whatsapp_ai_enabled } = req.body;
+    let mode = 'admin_only';
+    if (whatsapp_ai_enabled === 'true') mode = true;
+    else if (whatsapp_ai_enabled === 'false') mode = false;
+    else mode = 'admin_only';
+
+    saveSettings({ whatsapp_ai_enabled: mode });
+
+    req.session._msg = {
+      type: 'success',
+      text: mode === 'admin_only'
+        ? 'Pengaturan Bot AI berhasil disimpan: Khusus Admin Saja (Pelanggan tidak diganggu AI).'
+        : (mode === true ? 'Pengaturan Bot AI berhasil disimpan: Aktif untuk Semua Pengguna (Admin & Pelanggan).' : 'Pengaturan Bot AI berhasil disimpan: Nonaktif Sepenuhnya.')
+    };
+  } catch (err) {
+    req.session._msg = { type: 'danger', text: 'Gagal menyimpan pengaturan AI: ' + err.message };
   }
   res.redirect('/admin/whatsapp');
 });

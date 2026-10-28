@@ -139,9 +139,11 @@
                   <div style="font-size:11px;color:var(--muted);margin-top:4px">Menjawab pertanyaan seputar fitur aplikasi saat di-tag @bot atau via /tanya</div>
                 </div>
                 <div class="fg">
-                  <label class="fl">Google Gemini API Key (Gratis)</label>
-                  <input class="fc" name="gemini_api_key" value="<%= settings.gemini_api_key || '' %>" placeholder="AIzaSy... (dapatkan dari aistudio.google.com)">
-                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Kosongkan jika ingin menggunakan mode knowledge base lokal</div>
+                  <label class="fl">Status Mesin AI Terhubung</label>
+                  <div style="font-size:12px; font-weight:600; color:var(--primary,#0ea5e9); padding-top:6px">
+                    <i class="bi bi-cpu"></i> Provider Aktif: <span style="text-transform:uppercase"><%= settings.ai_provider || 'gemini' %></span>
+                  </div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Kunci API & model diatur pada kartu "Pengaturan Mesin AI" di bawah.</div>
                 </div>
               </div>
 
@@ -159,6 +161,132 @@
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- PENGATURAN MESIN AI (SHARED: TELEGRAM & WHATSAPP) -->
+        <div class="card mb16">
+          <div class="card-hd" style="display:flex;justify-content:space-between;align-items:center">
+            <h6><i class="bi bi-robot"></i> Pengaturan Mesin AI (Artificial Intelligence Multi-Provider)</h6>
+            <span class="badge" style="background:#0284c7;color:#fff;font-size:11px;padding:3px 8px;border-radius:4px">Telegram & WhatsApp</span>
+          </div>
+          <div class="card-bd">
+            <div class="hint" style="margin-bottom:14px">
+              Mesin AI ini digunakan secara otomatis oleh <strong>Telegram Bot</strong> dan <strong>WhatsApp Bot</strong> untuk menjawab tanya jawab pelanggan, melayani pertanyaan umum di luar sistem, serta mengeksekusi perintah operasional admin (cek tagihan, isolir, unisolir, reboot modem ONU, dsb.).
+            </div>
+
+            <div class="form-row">
+              <div class="fg">
+                <label class="fl">Provider AI Utama</label>
+                <select class="fs" name="ai_provider" id="ai_provider_select" onchange="toggleAiProviderFields()">
+                  <option value="gemini" <%= (settings.ai_provider || 'gemini') === 'gemini' ? 'selected' : '' %>>Google Gemini (Gratis, Sangat Cepat & Rekomendasi)</option>
+                  <option value="openai" <%= settings.ai_provider === 'openai' ? 'selected' : '' %>>OpenAI (ChatGPT - GPT-4o / GPT-4o-mini)</option>
+                  <option value="deepseek" <%= settings.ai_provider === 'deepseek' ? 'selected' : '' %>>DeepSeek (DeepSeek-V3 / DeepSeek-R1)</option>
+                  <option value="groq" <%= settings.ai_provider === 'groq' ? 'selected' : '' %>>Groq Cloud (Llama 3.3 Ultra Fast Inference)</option>
+                  <option value="openrouter" <%= settings.ai_provider === 'openrouter' ? 'selected' : '' %>>OpenRouter (Multi-Model Hub API)</option>
+                  <option value="custom" <%= settings.ai_provider === 'custom' ? 'selected' : '' %>>Custom / Local AI (Ollama / vLLM / LM Studio)</option>
+                </select>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px">Pilih penyedia AI yang ingin digunakan untuk bot Telegram & WhatsApp.</div>
+              </div>
+            </div>
+
+            <!-- Provider: Google Gemini -->
+            <div id="ai_fields_gemini" class="ai-provider-field" style="margin-top:12px">
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">Google Gemini API Key (Gratis)</label>
+                  <input class="fc" name="gemini_api_key" value="<%= settings.gemini_api_key || '' %>" placeholder="AIzaSy... (dapatkan dari aistudio.google.com)">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Dapatkan gratis di <strong>aistudio.google.com</strong>. Auto fallback: gemini-2.5-flash / gemini-2.0-flash. Kosongkan jika ingin mode offline.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Provider: OpenAI -->
+            <div id="ai_fields_openai" class="ai-provider-field" style="margin-top:12px; display:none">
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">OpenAI API Key</label>
+                  <input class="fc" type="password" name="openai_api_key" value="<%= settings.openai_api_key || '' %>" placeholder="sk-proj-...">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Dapatkan dari platform.openai.com/api-keys</div>
+                </div>
+                <div class="fg">
+                  <label class="fl">Model OpenAI</label>
+                  <input class="fc" name="openai_model" value="<%= settings.openai_model || 'gpt-4o-mini' %>" placeholder="gpt-4o-mini">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Contoh: <span class="mono">gpt-4o-mini</span> atau <span class="mono">gpt-4o</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Provider: DeepSeek -->
+            <div id="ai_fields_deepseek" class="ai-provider-field" style="margin-top:12px; display:none">
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">DeepSeek API Key</label>
+                  <input class="fc" type="password" name="deepseek_api_key" value="<%= settings.deepseek_api_key || '' %>" placeholder="sk-...">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Dapatkan dari platform.deepseek.com</div>
+                </div>
+                <div class="fg">
+                  <label class="fl">Model DeepSeek</label>
+                  <input class="fc" name="deepseek_model" value="<%= settings.deepseek_model || 'deepseek-chat' %>" placeholder="deepseek-chat">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Contoh: <span class="mono">deepseek-chat</span> (V3) atau <span class="mono">deepseek-reasoner</span> (R1)</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Provider: Groq -->
+            <div id="ai_fields_groq" class="ai-provider-field" style="margin-top:12px; display:none">
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">Groq API Key (Inference Sangat Cepat)</label>
+                  <input class="fc" type="password" name="groq_api_key" value="<%= settings.groq_api_key || '' %>" placeholder="gsk_...">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Dapatkan gratis di console.groq.com/keys</div>
+                </div>
+                <div class="fg">
+                  <label class="fl">Model Groq</label>
+                  <input class="fc" name="groq_model" value="<%= settings.groq_model || 'llama-3.3-70b-versatile' %>" placeholder="llama-3.3-70b-versatile">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Contoh: <span class="mono">llama-3.3-70b-versatile</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Provider: OpenRouter -->
+            <div id="ai_fields_openrouter" class="ai-provider-field" style="margin-top:12px; display:none">
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">OpenRouter API Key</label>
+                  <input class="fc" type="password" name="openrouter_api_key" value="<%= settings.openrouter_api_key || '' %>" placeholder="sk-or-v1-...">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Dapatkan dari openrouter.ai/keys</div>
+                </div>
+                <div class="fg">
+                  <label class="fl">Model OpenRouter</label>
+                  <input class="fc" name="openrouter_model" value="<%= settings.openrouter_model || 'meta-llama/llama-3.3-70b-instruct' %>" placeholder="meta-llama/llama-3.3-70b-instruct">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Contoh: <span class="mono">meta-llama/llama-3.3-70b-instruct</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Provider: Custom / Local AI -->
+            <div id="ai_fields_custom" class="ai-provider-field" style="margin-top:12px; display:none">
+              <div class="form-row">
+                <div class="fg">
+                  <label class="fl">API Base URL (OpenAI-Compatible Endpoint)</label>
+                  <input class="fc" name="custom_ai_base_url" value="<%= settings.custom_ai_base_url || '' %>" placeholder="http://localhost:11434/v1">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Contoh Ollama: <span class="mono">http://localhost:11434/v1</span> | LM Studio: <span class="mono">http://localhost:1234/v1</span></div>
+                </div>
+                <div class="fg">
+                  <label class="fl">Nama Model</label>
+                  <input class="fc" name="custom_ai_model" value="<%= settings.custom_ai_model || '' %>" placeholder="llama3:latest">
+                  <div style="font-size:11px;color:var(--muted);margin-top:4px">Contoh: <span class="mono">llama3</span>, <span class="mono">qwen2.5</span>, atau <span class="mono">mistral</span></div>
+                </div>
+              </div>
+              <div class="form-row" style="margin-top:10px">
+                <div class="fg">
+                  <label class="fl">API Key (Opsional)</label>
+                  <input class="fc" type="password" name="custom_ai_api_key" value="<%= settings.custom_ai_api_key || '' %>" placeholder="Kosongkan jika Ollama lokal tanpa password/auth">
+                </div>
+              </div>
+            </div>
+
           </div>
         </div>
 
@@ -447,12 +575,15 @@
             <div style="font-size:10px; color:var(--muted); margin-top:4px">Rekomendasi: Minimal 2 detik agar tidak terdeteksi spam oleh WhatsApp.</div>
           </div>
           <div class="fg">
-            <label class="fl">Asisten AI WhatsApp (CS Otomatis)</label>
+            <label class="fl">Mode Bot AI WhatsApp</label>
             <select class="fs" name="whatsapp_ai_enabled">
-              <option value="true" <%= settings.whatsapp_ai_enabled !== false ? 'selected' : '' %>>Aktif</option>
-              <option value="false" <%= settings.whatsapp_ai_enabled === false ? 'selected' : '' %>>Nonaktif</option>
+              <option value="admin_only" <%= (settings.whatsapp_ai_enabled === 'admin_only' || settings.whatsapp_ai_enabled === undefined || settings.whatsapp_ai_enabled === null) ? 'selected' : '' %>>🔒 Khusus Admin Saja (Disarankan)</option>
+              <option value="true" <%= (settings.whatsapp_ai_enabled === true || settings.whatsapp_ai_enabled === 'true') ? 'selected' : '' %>>🌐 Aktif untuk Semua (Admin & Pelanggan)</option>
+              <option value="false" <%= (settings.whatsapp_ai_enabled === false || settings.whatsapp_ai_enabled === 'false') ? 'selected' : '' %>>⏸️ Nonaktif Sepenuhnya</option>
             </select>
-            <div style="font-size:10px; color:var(--muted); margin-top:4px">Menjawab otomatis pertanyaan seputar paket, tagihan, dan panduan fitur menggunakan Google Gemini AI.</div>
+            <div style="font-size:10px; color:var(--muted); margin-top:4px">
+              Pilih <b>Khusus Admin Saja</b> agar pelanggan tidak dijawab AI sehingga CS manusia leluasa membalas tanpa terganggu bot.
+            </div>
           </div>
         </div>
 
@@ -986,6 +1117,23 @@ async function clearEwalletLogs() {
     }
   });
 })();
+
+// Multi-Provider AI UI Toggle
+function toggleAiProviderFields() {
+  const sel = document.getElementById('ai_provider_select');
+  if (!sel) return;
+  const val = sel.value || 'gemini';
+  const list = ['gemini', 'openai', 'deepseek', 'groq', 'openrouter', 'custom'];
+  list.forEach(p => {
+    const el = document.getElementById('ai_fields_' + p);
+    if (el) {
+      el.style.display = (p === val) ? 'block' : 'none';
+    }
+  });
+}
+if (document.getElementById('ai_provider_select')) {
+  toggleAiProviderFields();
+}
 
 setTimeout(loadEwalletLogs, 200);
 setTimeout(updateNotifHint, 250);

@@ -3635,7 +3635,7 @@ router.get('/dashboard', requireCustomerApiAuth, async (req, res) => {
     try {
       liveDevice = await Promise.race([
         customerDevice.getCustomerDeviceData(token),
-        new Promise(resolve => setTimeout(() => resolve(null), 2500))
+        new Promise(resolve => setTimeout(() => resolve(null), 5000))
       ]);
       if (liveDevice && liveDevice.status !== 'Tidak ditemukan') break;
     } catch (_) {}
@@ -3724,12 +3724,22 @@ router.get('/dashboard', requireCustomerApiAuth, async (req, res) => {
 // ─── 5. KONTROL WIFI & MODEM ONT (TR-069) ─────────────────────────────────────
 router.get('/wifi', requireCustomerApiAuth, async (req, res) => {
   const customer = req.customer;
-  const tokenCandidates = [customer.pppoe_username, customer.genieacs_tag, customer.phone, String(customer.id)].filter(Boolean);
+  const tokenCandidates = Array.from(new Set([
+    customer.pppoe_username,
+    customer.genieacs_tag,
+    customer.onu_sn,
+    customer.phone,
+    String(customer.id)
+  ].map(v => String(v || '').trim()).filter(Boolean)));
+
   let liveDevice = null;
   for (const token of tokenCandidates) {
     try {
-      liveDevice = await customerDevice.getCustomerDeviceData(token);
-      if (liveDevice) break;
+      liveDevice = await Promise.race([
+        customerDevice.getCustomerDeviceData(token),
+        new Promise(resolve => setTimeout(() => resolve(null), 5000))
+      ]);
+      if (liveDevice && liveDevice.status !== 'Tidak ditemukan') break;
     } catch (_) {}
   }
 
@@ -3760,64 +3770,110 @@ router.post('/wifi/change-ssid', requireCustomerApiAuth, async (req, res) => {
   const customer = req.customer;
   const newSsid = ssid.trim();
 
-  // Simpan ke DB customer
-  try {
-    db.prepare('UPDATE customers SET wifi_ssid = ? WHERE id = ?').run(newSsid, customer.id);
-  } catch (_) {}
-
   // Kirim ke GenieACS TR-069
-  const tokens = [customer.pppoe_username, customer.genieacs_tag, customer.phone, String(customer.id)].filter(Boolean);
+  const tokens = Array.from(new Set([
+    customer.pppoe_username,
+    customer.genieacs_tag,
+    customer.mac_address,
+    customer.onu_sn,
+    customer.phone,
+    String(customer.id)
+  ].map(v => String(v || '').trim()).filter(Boolean)));
+
+  let ok = false;
   for (const token of tokens) {
     try {
-      await customerDevice.updateSSID(token, newSsid);
+      ok = await customerDevice.updateSSID(token, newSsid);
+      if (ok) break;
     } catch (_) {}
   }
 
-  res.json({
-    success: true,
-    message: `Nama WiFi (SSID) berhasil diubah menjadi "${newSsid}". Silakan sambungkan ulang perangkat Anda.`
+  if (ok) {
+    // Simpan ke DB customer
+    try {
+      db.prepare('UPDATE customers SET wifi_ssid = ? WHERE id = ?').run(newSsid, customer.id);
+    } catch (_) {}
+
+    return res.json({
+      success: true,
+      message: `Nama WiFi (SSID) berhasil diubah menjadi "${newSsid}". Silakan sambungkan ulang perangkat Anda.`
+    });
+  }
+
+  return res.status(400).json({
+    success: false,
+    message: 'Gagal mengubah SSID. Pastikan perangkat modem aktif.'
   });
 });
 
 // Ubah Sandi WiFi Saja (Password)
 router.post('/wifi/change-password', requireCustomerApiAuth, async (req, res) => {
-  const { newPassword } = req.body;
-  if (!newPassword || newPassword.trim().length < 8) {
+  const newPassword = String(req.body?.newPassword || req.body?.password || '').replace(/[\r\n\t]+/g, '').trim();
+  if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ success: false, message: 'Sandi WiFi minimal 8 karakter.' });
   }
   const customer = req.customer;
-  const newPass = newPassword.trim();
-
-  // Simpan ke DB customer
-  try {
-    db.prepare('UPDATE customers SET pppoe_password = ? WHERE id = ?').run(newPass, customer.id);
-  } catch (_) {}
+  const newPass = newPassword;
 
   // Kirim ke GenieACS TR-069
-  const tokens = [customer.pppoe_username, customer.genieacs_tag, customer.phone, String(customer.id)].filter(Boolean);
+  const tokens = Array.from(new Set([
+    customer.pppoe_username,
+    customer.genieacs_tag,
+    customer.mac_address,
+    customer.onu_sn,
+    customer.phone,
+    String(customer.id)
+  ].map(v => String(v || '').trim()).filter(Boolean)));
+
+  let ok = false;
   for (const token of tokens) {
     try {
-      await customerDevice.updatePassword(token, newPass);
+      ok = await customerDevice.updatePassword(token, newPass);
+      if (ok) break;
     } catch (_) {}
   }
 
-  res.json({
-    success: true,
-    message: 'Sandi WiFi berhasil diperbarui! Silakan gunakan sandi baru untuk terhubung.'
+  if (ok) {
+    return res.json({
+      success: true,
+      message: 'Sandi WiFi berhasil diperbarui! Silakan gunakan sandi baru untuk terhubung.'
+    });
+  }
+
+  return res.status(400).json({
+    success: false,
+    message: 'Gagal mengubah sandi WiFi. Pastikan perangkat modem aktif.'
   });
 });
 
 router.post('/wifi/reboot', requireCustomerApiAuth, async (req, res) => {
   const customer = req.customer;
-  const tokens = [customer.pppoe_username, customer.genieacs_tag, customer.phone, String(customer.id)].filter(Boolean);
+  const tokens = Array.from(new Set([
+    customer.pppoe_username,
+    customer.genieacs_tag,
+    customer.onu_sn,
+    customer.phone,
+    String(customer.id)
+  ].map(v => String(v || '').trim()).filter(Boolean)));
+
+  let ok = false;
   for (const token of tokens) {
     try {
-      await customerDevice.requestReboot(token);
+      ok = await customerDevice.requestReboot(token);
+      if (ok) break;
     } catch (_) {}
   }
-  res.json({
-    success: true,
-    message: 'Perintah restart modem telah dikirim. Modem akan menyala ulang dalam 1-2 menit.'
+
+  if (ok) {
+    return res.json({
+      success: true,
+      message: 'Perintah restart modem telah dikirim. Modem akan menyala ulang dalam 1-2 menit.'
+    });
+  }
+
+  return res.status(400).json({
+    success: false,
+    message: 'Gagal mengirim perintah restart modem. Pastikan perangkat modem aktif.'
   });
 });
 
