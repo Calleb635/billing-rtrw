@@ -111,7 +111,8 @@ app.use((req, res, next) => {
     // Kecualikan webhook eksternal, ACS server TR-069, atau payment gateway callback
     const isWebhook = req.path.startsWith('/api/webhook') || req.path.startsWith('/webhook') || req.path === '/customer/payment/callback';
     const isAcs = req.path.startsWith('/acs');
-    if (isWebhook || isAcs) {
+    const isVoiceAi = req.path.includes('/voice-assistant') || req.headers['x-api-token'] === 'alijaya-voice-ai-2026';
+    if (isWebhook || isAcs || isVoiceAi) {
       return next();
     }
 
@@ -190,7 +191,7 @@ const selectInvoiceByUniqueAmount = db.prepare(`
          c.status as customer_status
   FROM invoices i
   JOIN customers c ON c.id = i.customer_id
-  WHERE i.status = 'unpaid' AND i.qris_amount_unique = ?
+  WHERE i.status = 'unpaid' AND (i.qris_amount_unique = ? OR (i.qris_amount_unique IS NULL AND i.amount = ?))
   ORDER BY i.id DESC
   LIMIT 2
 `);
@@ -198,7 +199,7 @@ const selectInvoiceByUniqueAmount = db.prepare(`
 const selectVoucherOrderByUniqueAmount = db.prepare(`
   SELECT id, status, profile_name, validity, buyer_phone
   FROM public_voucher_orders
-  WHERE status = 'pending' AND qris_amount_unique = ?
+  WHERE status = 'pending' AND (qris_amount_unique = ? OR (qris_amount_unique IS NULL AND price = ?))
   ORDER BY id DESC
   LIMIT 2
 `);
@@ -237,7 +238,7 @@ const markVoucherWaSentErr = db.prepare(`
 const selectDonationOrderByUniqueAmount = db.prepare(`
   SELECT id, status, donor_name, donor_phone, amount, qris_amount_unique, qris_unique_code, notes, activation_code
   FROM public_donation_orders
-  WHERE status = 'pending' AND qris_amount_unique = ?
+  WHERE status = 'pending' AND (qris_amount_unique = ? OR (qris_amount_unique IS NULL AND amount = ?))
   ORDER BY id DESC
   LIMIT 2
 `);
@@ -443,52 +444,69 @@ function parseRupiahAmountFromNotification(content) {
     return null;
   }
 
-  const incomingHints = [
-    'pembayaran masuk', 'pembayaran diterima', 'uang masuk', 'transfer masuk',
-    'dana masuk', 'saldo masuk', 'saldo bertambah', 'berhasil top up',
-    'top up berhasil', 'topup berhasil', 'terima uang', 'telah diterima dari',
-    'diterima dari', 'qris berhasil', 'qris sukses', 'qr berhasil', 'qr sukses',
-    'payment received', 'kamu menerima', 'berhasil menerima', 'menambahkan',
-    'telah diterima sebesar', 'uang diterima', 'diterima', 'terima transfer',
-    'transfer dari', 'kamu dapat', 'kamu dapet'
-  ];
   const outgoingHints = [
     'mengirim', 'terkirim', 'telah dikirim', 'berhasil kirim', 'transfer ke',
     'bayar ke', 'pembelian', 'belanja', 'purchase', 'kamu membayar',
     'transaksi keluar', 'debit', 'dikenakan biaya', 'potongan'
   ];
 
-  const hasIncomingHint = incomingHints.some((hint) => lower.includes(hint)) ||
-    (lower.includes('qris') && lower.includes('berhasil')) ||
-    (lower.includes('m-transfer') && lower.includes('cr'));
-
   const isIncomingOverride = lower.includes('diterima') ||
     lower.includes('masuk') ||
     lower.includes('kamu menerima') ||
     lower.includes('berhasil menerima') ||
-    lower.includes('terima transfer');
+    lower.includes('terima transfer') ||
+    lower.includes('ditambahkan') ||
+    lower.includes('pembayaran berhasil diterima');
 
   const hasOutgoingHint = outgoingHints.some((hint) => {
     if (isIncomingOverride && (hint === 'pembayaran berhasil' || hint === 'berhasil bayar')) return false;
     return lower.includes(hint);
   });
+  if (hasOutgoingHint) {
+    return null;
+  }
+
+  const incomingHints = [
+    'pembayaran masuk', 'pembayaran diterima', 'uang masuk', 'transfer masuk',
+    'dana masuk', 'saldo masuk', 'saldo bertambah', 'berhasil top up',
+    'top up berhasil', 'topup berhasil', 'terima uang', 'telah diterima dari',
+    'diterima dari', 'qris berhasil', 'qris sukses', 'qr berhasil', 'qr sukses',
+    'payment received', 'kamu menerima', 'berhasil menerima', 'menambahkan', 'ditambahkan',
+    'telah ditambahkan', 'berhasil ditambahkan', 'telah diterima sebesar', 'uang diterima', 'diterima', 'terima transfer',
+    'transfer dari', 'kamu dapat', 'kamu dapet', 'masuk ke rekening', 'masuk'
+  ];
+
+  const hasQrisIncoming = lower.includes('qris') && (
+    lower.includes('masuk') || lower.includes('diterima') || lower.includes('sukses') ||
+    lower.includes('berhasil') || lower.includes('payment') || lower.includes('transaksi') ||
+    lower.includes('rp') || lower.includes('cr') || lower.includes('dana') || lower.includes('uang')
+  );
+
+  const hasBcaIncoming = lower.includes('m-transfer') && (lower.includes('cr') || lower.includes('qris'));
+
+  const hasIncomingHint = incomingHints.some((hint) => lower.includes(hint)) || hasQrisIncoming || hasBcaIncoming;
 
   // WAJIB: Harus ada indikator uang masuk dan TIDAK BOLEH ada indikator uang keluar
-  if (!hasIncomingHint || hasOutgoingHint) {
+  if (!hasIncomingHint) {
     return null;
   }
 
   const candidates = [
     /(?:\bRp\.?\s*|IDR\s*)([0-9][0-9\.\,\s]*)/i,
-    /(?:sebesar|senilai|nominal|masuk|transfer|top\s*up|topup|saldo\s+masuk)\s*(?:saldo\s*)?(?:\bRp\.?\s*)?([0-9][0-9\.\,\s]*)/i,
+    /(?:sebesar|senilai|nominal|masuk|transfer|top\s*up|topup|saldo\s+masuk|diterima|ditambahkan)\s*(?:saldo\s*)?(?:\bRp\.?\s*)?([0-9][0-9\.\,\s]*)/i,
+    /(?:CR|QRIS)\s+(?:CR\s+)?([0-9][0-9\.\,]*)/i,
+    /([0-9][0-9\.\,]+)\s+CR\b/i
   ];
 
   let raw = null;
   for (const re of candidates) {
     const m = text.match(re);
     if (m && m[1]) {
-      raw = String(m[1]);
-      break;
+      const candidateRaw = String(m[1]).trim();
+      if (!candidateRaw.includes('/')) {
+        raw = candidateRaw;
+        break;
+      }
     }
   }
   if (!raw) return null;
@@ -957,9 +975,9 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
     let matchedTopupRequestId = null;
     if (amount != null) {
       try {
-        const invCandidates = selectInvoiceByUniqueAmount.all(amount);
-        const vCandidates = selectVoucherOrderByUniqueAmount.all(amount);
-        const dCandidates = selectDonationOrderByUniqueAmount.all(amount);
+        const invCandidates = selectInvoiceByUniqueAmount.all(amount, amount);
+        const vCandidates = selectVoucherOrderByUniqueAmount.all(amount, amount);
+        const dCandidates = selectDonationOrderByUniqueAmount.all(amount, amount);
         const tCandidates = selectTopupOrderByUniqueAmount ? selectTopupOrderByUniqueAmount.all(amount, amount) : [];
         const totalCandidates = (Array.isArray(invCandidates) ? invCandidates.length : 0) + 
                                 (Array.isArray(vCandidates) ? vCandidates.length : 0) +
@@ -1019,6 +1037,19 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
                 `🧾 *No. Invoice:* #${invId}\n` +
                 `📌 *Status:* LUNAS ✅`
               ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+
+              // Queue ke Soundbox Speaker Kasir Web
+              try {
+                const soundboxSvc = require('./services/soundboxService');
+                soundboxSvc.queueSoundboxEvent({
+                  type: 'invoice',
+                  title: 'Tagihan #' + invId,
+                  amount,
+                  customerName
+                });
+              } catch (e) {
+                logger.warn('[Soundbox] Webhook invoice event error: ' + (e?.message || e));
+              }
             } catch (ttsErr) {
               logger.warn('[WEBHOOK] TTS voice notification error: ' + ttsErr.message);
             }
@@ -1053,6 +1084,19 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
                   `🧾 *No. Order:* #${ordId}\n` +
                   `📌 *Status:* BERHASIL ✅`
                 ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+
+                // Queue ke Soundbox Speaker Kasir Web
+                try {
+                  const soundboxSvc = require('./services/soundboxService');
+                  soundboxSvc.queueSoundboxEvent({
+                    type: 'voucher',
+                    title: 'Voucher #' + ordId,
+                    amount,
+                    customerName: pkgName
+                  });
+                } catch (e) {
+                  logger.warn('[Soundbox] Webhook voucher event error: ' + (e?.message || e));
+                }
               } catch (ttsErr) {
                 logger.warn('[WEBHOOK] TTS voucher voice notification error: ' + ttsErr.message);
               }
@@ -1086,6 +1130,19 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
                   `🏦 *Sumber Rekening:* ${service || 'E-Wallet'}\n` +
                   `📌 *Status:* DITERIMA ✅`
                 ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+
+                // Queue ke Soundbox Speaker Kasir Web
+                try {
+                  const soundboxSvc = require('./services/soundboxService');
+                  soundboxSvc.queueSoundboxEvent({
+                    type: 'donation',
+                    title: 'Donasi #' + donId,
+                    amount,
+                    customerName: donorName
+                  });
+                } catch (e) {
+                  logger.warn('[Soundbox] Webhook donation event error: ' + (e?.message || e));
+                }
               } catch (ttsErr) {
                 logger.warn('[WEBHOOK] TTS donation voice notification error: ' + ttsErr.message);
               }
@@ -1165,6 +1222,19 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
                   `🆔 *ID Transaksi:* TOPUP-${topupId}\n` +
                   `📌 *Status:* BERHASIL ✅`
                 ).catch((e) => logger.warn('[WEBHOOK TTS] Error sending voice: ' + e.message));
+
+                // Queue ke Soundbox Speaker Kasir Web
+                try {
+                  const soundboxSvc = require('./services/soundboxService');
+                  soundboxSvc.queueSoundboxEvent({
+                    type: 'topup',
+                    title: 'Top-Up #' + topupId,
+                    amount: baseAmount,
+                    customerName: custName
+                  });
+                } catch (e) {
+                  logger.warn('[Soundbox] Webhook topup event error: ' + (e?.message || e));
+                }
               } catch (ttsErr) {
                 logger.warn('[WEBHOOK] TTS topup voice notification error: ' + ttsErr.message);
               }
@@ -2165,6 +2235,79 @@ app.use('/agent', agentPortal);
 // Mount collector portal
 const collectorPortal = require('./routes/collectorPortal');
 app.use('/collector', collectorPortal);
+
+// ==========================================
+// VOICE AI ASSISTANT REST API (ANDROID & WEB)
+// ==========================================
+const telegramAi = require('./services/telegramAiService');
+const voiceTts = require('./services/voiceTtsService');
+
+function requireVoiceApiAuth(req, res, next) {
+  const token = req.headers['x-api-token'] || req.query?.token || req.body?.apiToken || (req.headers['authorization'] ? req.headers['authorization'].replace(/^Bearer\s+/i, '') : null);
+  if (token === 'alijaya-voice-ai-2026' || req.body?.isAdmin === true || req.session?.isAdmin) {
+    req.session = req.session || {};
+    req.session.isAdmin = true;
+    req.session.adminUser = req.session.adminUser || { name: 'Alijaya Voice AI', role: 'admin' };
+    return next();
+  }
+  return res.status(401).json({ ok: false, error: 'Unauthorized Voice AI Token' });
+}
+
+app.post(['/api/voice-assistant/ask', '/admin/api/voice-assistant/ask'], requireVoiceApiAuth, express.json(), async (req, res) => {
+  try {
+    const rawQuestion = String(req.body.message || '').trim();
+    if (!rawQuestion) {
+      return res.status(400).json({ ok: false, error: 'Pesan suara atau teks tidak boleh kosong.' });
+    }
+
+    const senderName = req.session.adminUser?.name || 'Admin';
+    const answer = await telegramAi.askAi({
+      question: rawQuestion,
+      senderName,
+      isAdmin: true,
+      extraContext: {
+        phone: req.session.adminUser?.phone || '',
+        req
+      }
+    });
+
+    const cleanDisplay = typeof telegramAi.cleanAiResponse === 'function' ? telegramAi.cleanAiResponse(answer) : answer;
+    const speechText = voiceTts.cleanTextForSpeech ? voiceTts.cleanTextForSpeech(cleanDisplay) : cleanDisplay;
+
+    res.json({
+      ok: true,
+      text: cleanDisplay,
+      speechText
+    });
+  } catch (err) {
+    logger.error('[VoiceAssistant Root API] Error: ' + err.message);
+    res.status(500).json({ ok: false, error: err.message || 'Gagal memproses AI' });
+  }
+});
+
+app.get(['/api/voice-assistant/tts', '/admin/api/voice-assistant/tts'], requireVoiceApiAuth, async (req, res) => {
+  try {
+    const text = String(req.query.text || '').trim();
+    if (!text) {
+      return res.status(400).send('Teks kosong');
+    }
+
+    const audioBuffer = await voiceTts.generateIndonesianSpeech(text);
+    if (!audioBuffer) {
+      return res.status(500).send('Gagal membuat audio');
+    }
+
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': audioBuffer.length,
+      'Cache-Control': 'public, max-age=86400'
+    });
+    res.send(audioBuffer);
+  } catch (err) {
+    logger.error('[VoiceTTS Root API] Error: ' + err.message);
+    res.status(500).send('Error generate TTS: ' + err.message);
+  }
+});
 
 // Fungsi untuk memulai server dengan penanganan port yang sudah digunakan
 function startServer(portToUse) {

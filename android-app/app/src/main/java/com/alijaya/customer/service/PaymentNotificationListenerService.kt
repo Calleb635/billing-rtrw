@@ -57,6 +57,9 @@ class PaymentNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.i(TAG, "NotificationListenerService Connected & Ready.")
+        try {
+            SoundboxSpeakerHelper.init(applicationContext)
+        } catch (_: Exception) {}
     }
 
     override fun onListenerDisconnected() {
@@ -116,8 +119,8 @@ class PaymentNotificationListenerService : NotificationListenerService() {
 
         val containsFinancialKeywords = containsPaymentKeyword(fullContent)
 
-        // Harus memenuhi syarat: masuk daftar whitelist ATAU (monitor all & ada keyword pembayaran)
-        if (!isWhitelisted && !(monitorAll && containsFinancialKeywords)) {
+        // Harus memenuhi syarat: masuk daftar whitelist ATAU (monitor all & ada keyword pembayaran) ATAU (belum ada package terpilih & ada keyword pembayaran)
+        if (!isWhitelisted && !(monitorAll && containsFinancialKeywords) && !(selectedPackages.isEmpty() && containsFinancialKeywords)) {
             return
         }
 
@@ -159,22 +162,43 @@ class PaymentNotificationListenerService : NotificationListenerService() {
             return false
         }
 
+        val outgoingHints = listOf(
+            "telah dikirim", "berhasil kirim", "transfer ke", "bayar ke",
+            "pembelian", "belanja", "kamu membayar", "transaksi keluar", "dikenakan biaya"
+        )
+        val isIncomingOverride = lower.contains("diterima") ||
+            lower.contains("masuk") ||
+            lower.contains("kamu menerima") ||
+            lower.contains("berhasil menerima") ||
+            lower.contains("terima transfer") ||
+            lower.contains("pembayaran berhasil diterima")
+
+        val hasOutbound = outgoingHints.any {
+            if (isIncomingOverride && (it == "pembayaran berhasil" || it == "berhasil bayar")) false
+            else lower.contains(it)
+        }
+        if (hasOutbound) return false
+
         val keywords = listOf(
             "transfer masuk", "dana masuk", "uang masuk", "pembayaran masuk",
             "pembayaran diterima", "saldo masuk", "saldo bertambah", "berhasil top up",
             "top up berhasil", "topup berhasil", "terima uang", "telah diterima dari",
             "diterima dari", "qris berhasil", "qris sukses", "qr berhasil", "qr sukses",
-            "payment received", "kamu menerima", "berhasil menerima", "uang diterima"
+            "payment received", "kamu menerima", "berhasil menerima", "uang diterima",
+            "diterima", "berhasil diterima", "kamu dapat", "kamu dapet", "masuk ke rekening",
+            "masuk"
         )
-        val hasInbound = keywords.any { lower.contains(it) }
+        val hasInboundKeyword = keywords.any { lower.contains(it) }
 
-        val outgoingHints = listOf(
-            "telah dikirim", "berhasil kirim", "transfer ke", "bayar ke", "berhasil bayar",
-            "pembelian", "belanja", "kamu membayar", "transaksi keluar", "dikenakan biaya"
+        val hasQrisInbound = lower.contains("qris") && (
+            lower.contains("masuk") || lower.contains("diterima") || lower.contains("sukses") ||
+            lower.contains("berhasil") || lower.contains("payment") || lower.contains("transaksi") ||
+            lower.contains("rp") || lower.contains("cr") || lower.contains("dana") || lower.contains("uang")
         )
-        val hasOutbound = outgoingHints.any { lower.contains(it) }
 
-        return hasInbound && !hasOutbound
+        val hasBcaInbound = lower.contains("m-transfer") && (lower.contains("cr") || lower.contains("qris"))
+
+        return hasInboundKeyword || hasQrisInbound || hasBcaInbound
     }
 
     private fun mapPackageToServiceName(pkg: String): String {
@@ -237,6 +261,19 @@ class PaymentNotificationListenerService : NotificationListenerService() {
                 event.status = "✅ Sukses (HTTP $respCode)"
                 event.serverResponse = respBody.take(150)
                 Log.i(TAG, "Webhook dispatched successfully: HTTP $respCode - $respBody")
+
+                if (session.isSoundboxSpeakerEnabled()) {
+                    var spoken = "Pembayaran $service berhasil diterima."
+                    try {
+                        val respJson = JSONObject(respBody)
+                        val amt = respJson.optInt("amount", 0)
+                        if (amt > 0) {
+                            val formatted = amt.toString().replace(Regex("(\\d)(?=(\\d{3})+$)"), "$1.")
+                            spoken = "Pembayaran $service sebesar $formatted rupiah berhasil diterima."
+                        }
+                    } catch (_: Exception) {}
+                    SoundboxSpeakerHelper.speak(applicationContext, spoken)
+                }
             } else {
                 event.status = "❌ Gagal (HTTP $respCode)"
                 event.serverResponse = respBody.take(150)

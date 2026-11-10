@@ -934,7 +934,7 @@ router.get('/voucher', async (req, res) => {
   const getVoucherPaymentChannels = async () => {
     // Cek apakah ada gateway yang aktif
     const gateway = resolveVoucherGateway();
-    if (!gateway) {
+    if (!gateway || gateway === 'qris_static') {
       return [];
     }
     
@@ -961,20 +961,14 @@ router.get('/voucher', async (req, res) => {
         logger.warn('[Voucher] Tripay channels fetch failed or timeout: ' + e.message);
         channels = [];
       }
+    } else if (gateway === 'midtrans') {
+      channels = [{ code: 'SNAP', name: 'Semua Metode (Snap)', group: 'E-Wallet', active: true }];
+    } else if (gateway === 'xendit') {
+      channels = [{ code: 'XENDIT', name: 'Semua Metode', group: 'E-Wallet', active: true }];
+    } else if (gateway === 'duitku') {
+      channels = [{ code: 'DUITKU', name: 'Semua Metode', group: 'E-Wallet', active: true }];
     } else {
-      // Gateway lain tidak perlu query API, langsung return hardcoded
-      const base = [
-        { code: 'QRIS', name: 'QRIS', group: 'QRIS', active: true },
-        { code: 'BCAVA', name: 'BCA Virtual Account', group: 'Virtual Account', active: true },
-        { code: 'BNIVA', name: 'BNI Virtual Account', group: 'Virtual Account', active: true },
-        { code: 'BRIVA', name: 'BRI Virtual Account', group: 'Virtual Account', active: true },
-        { code: 'PERMATAVA', name: 'Permata Virtual Account', group: 'Virtual Account', active: true },
-        { code: 'MANDIRIVA', name: 'Mandiri Virtual Account', group: 'Virtual Account', active: true }
-      ];
-      if (gateway === 'midtrans') channels = [{ code: 'SNAP', name: 'Semua Metode (Snap)', group: 'E-Wallet', active: true }, ...base];
-      else if (gateway === 'xendit') channels = [{ code: 'XENDIT', name: 'Semua Metode', group: 'E-Wallet', active: true }, ...base];
-      else if (gateway === 'duitku') channels = [{ code: 'DUITKU', name: 'Semua Metode', group: 'E-Wallet', active: true }, ...base];
-      else channels = base;
+      channels = [];
     }
     
     // Simpan ke cache (jika enabled)
@@ -1014,8 +1008,11 @@ router.get('/voucher', async (req, res) => {
     }
   }
 
+  const gateway = resolveVoucherGateway();
+
   res.render('public_voucher', {
     settings,
+    gateway,
     profiles,
     paymentChannels,
     order,
@@ -1303,13 +1300,13 @@ router.post('/public/voucher/create-payment', async (req, res) => {
         method = 'QRIS';
       }
     } else if (gateway === 'midtrans') {
-      const allowed = new Set(['SNAP', 'QRIS', 'BCAVA', 'BNIVA', 'BRIVA', 'PERMATAVA', 'MANDIRIVA']);
+      const allowed = new Set(['SNAP', 'QRIS']);
       if (!allowed.has(method)) method = 'SNAP';
     } else if (gateway === 'xendit') {
-      const allowed = new Set(['XENDIT', 'QRIS', 'BCAVA', 'BNIVA', 'BRIVA', 'PERMATAVA', 'MANDIRIVA']);
+      const allowed = new Set(['XENDIT', 'QRIS']);
       if (!allowed.has(method)) method = 'XENDIT';
     } else if (gateway === 'duitku') {
-      const allowed = new Set(['DUITKU', 'QRIS', 'BCAVA', 'BNIVA', 'BRIVA', 'PERMATAVA', 'MANDIRIVA']);
+      const allowed = new Set(['DUITKU', 'QRIS']);
       if (!allowed.has(method)) method = 'DUITKU';
     }
 
@@ -3237,6 +3234,8 @@ router.post('/payment/callback', express.json({
           while (attempt < 10) {
             attempt++;
             const coreLen = Math.max(4, codeLength - prefix.length);
+            const code = prefix + genCustomCode(coreLen, charset);
+            const pass = code;
             const now = new Date();
             const dd = String(now.getDate()).padStart(2, '0');
             const mm = String(now.getMonth() + 1).padStart(2, '0');
@@ -3274,6 +3273,18 @@ router.post('/payment/callback', express.json({
                 updated_at=(NOW_LOCAL())
             WHERE id=?
           `).run(created.code, created.pass, created.comment, orderId);
+
+          try {
+            const soundboxSvc = require('../services/soundboxService');
+            soundboxSvc.queueSoundboxEvent({
+              type: 'voucher',
+              title: 'Voucher #' + orderId,
+              amount: fresh.price,
+              customerName: fresh.profile_name || 'Hotspot'
+            });
+          } catch (e) {
+            logger.warn('[Soundbox] CP voucher event error: ' + (e?.message || e));
+          }
 
           if (settings.whatsapp_enabled) {
             try {

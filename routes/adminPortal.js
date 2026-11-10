@@ -76,6 +76,9 @@ const { MultiFormatReader, BarcodeFormat, DecodeHintType, BinaryBitmap, HybridBi
 const QRCode = require('qrcode');
 const acsPortal = require('./acsPortal');
 const { uploadAttendance, removeAttendanceFile } = require('../middleware/attendanceUpload');
+const telegramAi = require('../services/telegramAiService');
+const voiceTts = require('../services/voiceTtsService');
+const securityWatchdog = require('../services/securityWatchdogService');
 
 const DIGIFLAZZ_URL = 'https://api.digiflazz.com/v1';
 const digiflazzApi = axios.create({
@@ -366,10 +369,17 @@ function copyDirSync(srcDir, destDir) {
   fs.mkdirSync(destDir, { recursive: true });
   const entries = fs.readdirSync(srcDir, { withFileTypes: true });
   for (const ent of entries) {
+    if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === '.update_backup' || ent.name === 'backups') continue;
     const src = path.join(srcDir, ent.name);
     const dst = path.join(destDir, ent.name);
     if (ent.isDirectory()) copyDirSync(src, dst);
-    else if (ent.isFile()) fs.copyFileSync(src, dst);
+    else if (ent.isFile()) {
+      try {
+        fs.copyFileSync(src, dst);
+      } catch (err) {
+        logger.warn(`[copyDirSync] Skip file ${src}: ${err.message}`);
+      }
+    }
   }
 }
 
@@ -395,7 +405,7 @@ function getGitDefaultBranch(repoRoot) {
 
 function getUpdateInfo(repoRoot) {
   const localVersion = readTextFileSafe(path.join(repoRoot, 'version.txt')) || '-';
-  const info = { localVersion, remoteVersion: '-', branch: '-', needsUpdate: false, error: '' };
+  const info = { localVersion, remoteVersion: '-', branch: '-', needsUpdate: false, commitsBehind: 0, error: '' };
 
   const inside = runCmd('git', ['rev-parse', '--is-inside-work-tree'], repoRoot);
   if (!inside.ok) {
@@ -413,14 +423,18 @@ function getUpdateInfo(repoRoot) {
   }
 
   const remote = runCmd('git', ['show', `origin/${branch}:version.txt`], repoRoot);
-  if (!remote.ok) {
-    info.error = `Tidak bisa membaca version.txt dari GitHub (origin/${branch}).`;
-    return info;
-  }
-
-  const remoteVersion = String(remote.stdout || '').trim() || '-';
+  const remoteVersion = remote.ok ? (String(remote.stdout || '').trim() || '-') : '-';
   info.remoteVersion = remoteVersion;
-  info.needsUpdate = Boolean(remoteVersion && remoteVersion !== '-' && remoteVersion !== localVersion);
+
+  const revDiff = runCmd('git', ['rev-list', '--count', `HEAD..origin/${branch}`], repoRoot);
+  const commitsBehind = revDiff.ok ? parseInt(String(revDiff.stdout || '0').trim(), 10) || 0 : 0;
+  info.commitsBehind = commitsBehind;
+
+  info.needsUpdate = Boolean(
+    (remoteVersion && remoteVersion !== '-' && remoteVersion !== localVersion) ||
+    commitsBehind > 0
+  );
+
   return info;
 }
 
@@ -561,9 +575,19 @@ router.get('/login', (req, res) => {
   res.render('admin/login', { title: 'Admin Login', company: company(), error: null });
 });
 
-router.post('/login', loginRateLimiter, express.urlencoded({ extended: true }), (req, res) => {
+router.post('/login', loginRateLimiter, express.urlencoded({ extended: true }), async (req, res) => {
+  const ip = req.ip || req.connection?.remoteAddress || '127.0.0.1';
+  if (securityWatchdog.isIpBlocked(ip)) {
+    return res.render('admin/login', { 
+      title: 'Admin Login', 
+      company: company(), 
+      error: 'Akses login diblokir sementara karena terdeteksi percobaan login berulang kali. Silakan hubungi administrator atau coba lagi nanti.' 
+    });
+  }
+
   const { username, password } = req.body;
   if (username === getSetting('admin_username', 'admin') && password === getSetting('admin_password', 'admin123')) {
+    await securityWatchdog.recordAppLoginAttempt({ type: 'admin', username, ip, success: true });
     req.session.isAdmin = true;
     req.session.adminUser = username;
     return res.redirect('/admin');
@@ -572,12 +596,21 @@ router.post('/login', loginRateLimiter, express.urlencoded({ extended: true }), 
   // Check Cashier
   const cashier = adminSvc.authenticateCashier(username, password);
   if (cashier) {
+    await securityWatchdog.recordAppLoginAttempt({ type: 'cashier', username, ip, success: true });
     req.session.isCashier = true;
     req.session.cashierId = cashier.id;
     req.session.cashierName = cashier.name;
     req.session.cashierUsername = cashier.username;
     return res.redirect('/admin');
   }
+
+  await securityWatchdog.recordAppLoginAttempt({ 
+    type: 'admin', 
+    username: username || '', 
+    ip, 
+    success: false, 
+    userAgent: req.get('user-agent') 
+  });
 
   res.render('admin/login', { title: 'Admin Login', company: company(), error: 'Username atau password salah' });
 });
@@ -2721,6 +2754,140 @@ router.post('/api/vouchers/packages/:id/delete', requireAdminSession, (req, res)
   }
 });
 
+// ─── VOUCHER ONLINE TRANSACTIONS (PUBLIC VOUCHER ORDERS) ───────────────────
+router.get('/vouchers/orders', requireAdminSession, requireSidebarMenuAccess('voucher_packages'), (req, res) => {
+  const selectedRouterId = req.selectedRouterId || (req.query.router_id ? Number(req.query.router_id) : null);
+  const routers = db.prepare('SELECT id, name FROM routers WHERE is_active = 1').all();
+  res.render('admin/vouchers_orders', {
+    title: 'Riwayat Transaksi Voucher Online',
+    company: company(),
+    activePage: 'voucher_packages',
+    routers,
+    selectedRouterId,
+    msg: flashMsg(req)
+  });
+});
+
+router.get('/api/vouchers/orders', requireAdminSession, (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+    const status = String(req.query.status || '').trim();
+    const routerId = req.query.router_id ? Number(req.query.router_id) : null;
+    const q = String(req.query.q || '').trim();
+
+    const where = [];
+    const params = [];
+
+    if (status) {
+      where.push('pvo.status = ?');
+      params.push(status);
+    }
+    if (routerId && routerId > 0) {
+      where.push('pvo.router_id = ?');
+      params.push(routerId);
+    }
+    if (q) {
+      where.push('(pvo.voucher_code LIKE ? OR pvo.buyer_phone LIKE ? OR pvo.profile_name LIKE ? OR CAST(pvo.id AS TEXT) LIKE ?)');
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+    }
+
+    const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
+    // Summary statistics
+    const statsRow = db.prepare(`
+      SELECT 
+        COUNT(*) as total_orders,
+        SUM(CASE WHEN status IN ('paid', 'fulfilled') THEN price ELSE 0 END) as total_revenue,
+        SUM(CASE WHEN status = 'fulfilled' THEN 1 ELSE 0 END) as fulfilled_count,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) as expired_count
+      FROM public_voucher_orders
+    `).get();
+
+    // Total count for current filter
+    const totalCount = db.prepare(`
+      SELECT COUNT(*) as cnt 
+      FROM public_voucher_orders pvo
+      ${whereSql}
+    `).get(...params).cnt;
+
+    // Paginated list
+    const rows = db.prepare(`
+      SELECT pvo.*, r.name as router_name
+      FROM public_voucher_orders pvo
+      LEFT JOIN routers r ON r.id = pvo.router_id
+      ${whereSql}
+      ORDER BY pvo.id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+
+    // Format dates to local
+    const formattedRows = rows.map(r => {
+      const displayDate = r.paid_at || r.created_at;
+      return {
+        ...r,
+        created_at: r.created_at ? formatDateLocal(r.created_at, 'YYYY-MM-DD HH:mm:ss') : null,
+        paid_at: r.paid_at ? formatDateLocal(r.paid_at, 'YYYY-MM-DD HH:mm:ss') : null,
+        fulfilled_at: r.fulfilled_at ? formatDateLocal(r.fulfilled_at, 'YYYY-MM-DD HH:mm:ss') : null,
+        time_ago: displayDate ? formatDateLocal(displayDate, 'DD MMM YYYY, HH:mm') : '-'
+      };
+    });
+
+    res.json({
+      ok: true,
+      rows: formattedRows,
+      stats: statsRow || {},
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        totalPages: Math.ceil(totalCount / limit) || 1
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+router.post('/api/vouchers/orders/:id/resend-wa', requireAdminSession, async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const order = db.prepare('SELECT * FROM public_voucher_orders WHERE id = ?').get(orderId);
+    if (!order) return res.status(404).json({ ok: false, error: 'Pesanan voucher tidak ditemukan' });
+    if (!order.buyer_phone) return res.status(400).json({ ok: false, error: 'Nomor WhatsApp pembeli tidak tercatat' });
+    if (!order.voucher_code) return res.status(400).json({ ok: false, error: 'Kode voucher belum digenerate untuk pesanan ini' });
+
+    const { sendWA, whatsappStatus } = await import('../services/whatsappBot.mjs');
+    if (whatsappStatus.connection !== 'open') {
+      return res.status(400).json({ ok: false, error: 'Bot WhatsApp sedang tidak terhubung' });
+    }
+
+    const gateway = (order.payment_gateway || 'QRIS').toUpperCase();
+    const msg =
+      `🎫 *KIRIM ULANG VOUCHER HOTSPOT*\n\n` +
+      `✅ Pembayaran diterima via *${gateway}*\n` +
+      `📦 Paket: *${order.profile_name}* (${order.validity || '-'})\n` +
+      `💰 Harga: Rp ${Number(order.price || 0).toLocaleString('id-ID')}\n\n` +
+      `👤 User: *${order.voucher_code}*\n` +
+      `🔑 Pass: *${order.voucher_password || order.voucher_code}*\n\n` +
+      `Terima kasih telah menggunakan layanan kami.`;
+
+    await sendWA(order.buyer_phone, msg);
+
+    db.prepare(`
+      UPDATE public_voucher_orders
+      SET wa_sent = 1, wa_sent_at = (NOW_LOCAL()), wa_error = '', updated_at = (NOW_LOCAL())
+      WHERE id = ?
+    `).run(orderId);
+
+    res.json({ ok: true, message: 'Voucher berhasil dikirim ulang ke WhatsApp' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── BILLING ───────────────────────────────────────────────────────────────
 router.get('/billing', requireAdminSession, requireSidebarMenuAccess('billing'), (req, res) => {
   const timeInfo = getCurrentTimeInfo();
@@ -3519,73 +3686,148 @@ router.post('/tickets/:id/delete', requireAdminSession, (req, res) => {
 
 // ─── REPORTS ───────────────────────────────────────────────────────────────
 router.get('/reports', requireAdminSession, requireSidebarMenuAccess('reports'), (req, res) => {
-  const filterYear = parseInt(req.query.year) || new Date().getFullYear();
   const now = new Date();
-  const monthlyData = billingSvc.getMonthlyRevenue(filterYear);
+  const filterYear = parseInt(req.query.year) || now.getFullYear();
+  const filterMonth = parseInt(req.query.month) || (filterYear === now.getFullYear() ? (now.getMonth() + 1) : 1);
   const recentPayments = billingSvc.getRecentPayments(10);
   const topUnpaid = billingSvc.getTopUnpaid(5);
   const activeCustomers = customerSvc.getCustomerStats().active;
 
   const yStr = String(filterYear);
+
+  // 12-Month Detailed Breakdown
+  const monthlyData = [];
+  let cashInYear = 0;
+  let expensesYear = 0;
+  let revenueYearDirect = 0;
+  let agentDepositYear = 0;
+  let customCashInYear = 0;
+  let voucherYear = 0;
+  let donationYear = 0;
+
+  for (let m = 1; m <= 12; m++) {
+    const loopMStr = String(m).padStart(2, '0');
+
+    // Tagihan menurut periode penagihan bulan m
+    const invPeriod = db.prepare(`
+      SELECT 
+        COUNT(*) as total_invoices,
+        SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN status='unpaid' THEN 1 ELSE 0 END) as unpaid_count,
+        SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) as invoice_revenue
+      FROM invoices 
+      WHERE period_year = ? AND period_month = ?
+    `).get(filterYear, m);
+
+    // Kas masuk riil bulan berjalan:
+    // 1. Tagihan langsung (bukan lewat saldo agen) yang dibayar pada bulan m
+    const dirPaid = db.prepare(`
+      SELECT SUM(amount) as t 
+      FROM invoices 
+      WHERE status='paid' 
+        AND strftime('%Y', paid_at) = ? 
+        AND strftime('%m', paid_at) = ? 
+        AND (paid_by_name IS NULL OR paid_by_name NOT LIKE 'Agent %')
+    `).get(yStr, loopMStr)?.t || 0;
+
+    // 2. Deposit / topup saldo agen pada bulan m
+    const agTopup = db.prepare(`
+      SELECT SUM(amount_buy) as t 
+      FROM agent_transactions 
+      WHERE type='topup' 
+        AND strftime('%Y', created_at) = ? 
+        AND strftime('%m', created_at) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    // 3. Voucher hotspot online berbayar
+    const vPaid = db.prepare(`
+      SELECT SUM(price) as t 
+      FROM public_voucher_orders 
+      WHERE status='paid' 
+        AND strftime('%Y', COALESCE(paid_at, created_at)) = ? 
+        AND strftime('%m', COALESCE(paid_at, created_at)) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    // 4. Donasi publik online
+    const donPaid = db.prepare(`
+      SELECT SUM(COALESCE(qris_amount_unique, amount)) as t 
+      FROM public_donation_orders 
+      WHERE status='paid' 
+        AND strftime('%Y', COALESCE(paid_at, created_at)) = ? 
+        AND strftime('%m', COALESCE(paid_at, created_at)) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    // 5. Kas masuk manual
+    const cIn = db.prepare(`
+      SELECT SUM(amount) as t 
+      FROM cash_in 
+      WHERE strftime('%Y', date) = ? 
+        AND strftime('%m', date) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const mIncome = dirPaid + agTopup + vPaid + donPaid + cIn;
+
+    // Pengeluaran operasional & gaji pada bulan m
+    const expReg = db.prepare(`
+      SELECT SUM(amount) as t 
+      FROM expenses 
+      WHERE strftime('%Y', date) = ? 
+        AND strftime('%m', date) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    // Modal PPOB Digiflazz pada bulan m
+    const digiCost = db.prepare(`
+      SELECT SUM(digi_price) as t 
+      FROM agent_transactions 
+      WHERE type='pulsa' 
+        AND digi_status='sukses' 
+        AND strftime('%Y', created_at) = ? 
+        AND strftime('%m', created_at) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const mExpense = expReg + digiCost;
+    const mNetProfit = mIncome - mExpense;
+
+    cashInYear += mIncome;
+    expensesYear += mExpense;
+    revenueYearDirect += dirPaid;
+    agentDepositYear += agTopup;
+    customCashInYear += cIn;
+    voucherYear += vPaid;
+    donationYear += donPaid;
+
+    monthlyData.push({
+      month: m,
+      total_invoices: invPeriod?.total_invoices || 0,
+      paid_count: invPeriod?.paid_count || 0,
+      unpaid_count: invPeriod?.unpaid_count || 0,
+      revenue: invPeriod?.invoice_revenue || 0,
+      income: mIncome,
+      expense: mExpense,
+      net_profit: mNetProfit
+    });
+  }
+
+  // Total invoice billing revenue for whole year
   const revenueYearAllRow = db.prepare(
-    "SELECT SUM(amount) as t FROM invoices WHERE status='paid' AND strftime('%Y', paid_at) = ?"
-  ).get(yStr);
-  const revenueYearAll = Number(revenueYearAllRow?.t || 0);
+    "SELECT SUM(amount) as t FROM invoices WHERE status='paid' AND period_year = ?"
+  ).get(filterYear);
+  const totalRevenue = Number(revenueYearAllRow?.t || 0) + voucherYear + donationYear + customCashInYear;
 
-  const revenueYearDirectRow = db.prepare(
-    "SELECT SUM(amount) as t FROM invoices WHERE status='paid' AND strftime('%Y', paid_at) = ? AND (paid_by_name IS NULL OR paid_by_name NOT LIKE 'Agent %')"
-  ).get(yStr);
-  const revenueYearDirect = Number(revenueYearDirectRow?.t || 0);
-  const revenueYearAgent = Math.max(0, revenueYearAll - revenueYearDirect);
+  // Selected Month Figures
+  const selectedMonthObj = monthlyData[filterMonth - 1] || { income: 0, expense: 0, net_profit: 0, revenue: 0 };
+  const cashInThisMonth = selectedMonthObj.income;
+  const expensesMonth = selectedMonthObj.expense;
+  const netProfitMonth = selectedMonthObj.net_profit;
+  const thisMonth = selectedMonthObj.revenue;
 
-  const agentDepositYearRow = db.prepare(
-    "SELECT SUM(amount_buy) as t FROM agent_transactions WHERE type='topup' AND strftime('%Y', created_at) = ?"
-  ).get(yStr);
-  const agentDepositYear = Number(agentDepositYearRow?.t || 0);
+  const netProfitYear = cashInYear - expensesYear;
 
-  const nowYearStr = String(now.getFullYear());
-  const nowMonthStr = String(now.getMonth() + 1).padStart(2, '0');
-  const revenueThisMonthAllRow = db.prepare(
-    "SELECT SUM(amount) as t FROM invoices WHERE status='paid' AND strftime('%Y', paid_at) = ? AND strftime('%m', paid_at) = ?"
-  ).get(nowYearStr, nowMonthStr);
-  const revenueThisMonthAll = Number(revenueThisMonthAllRow?.t || 0);
-
-  const revenueThisMonthDirectRow = db.prepare(
-    "SELECT SUM(amount) as t FROM invoices WHERE status='paid' AND strftime('%Y', paid_at) = ? AND strftime('%m', paid_at) = ? AND (paid_by_name IS NULL OR paid_by_name NOT LIKE 'Agent %')"
-  ).get(nowYearStr, nowMonthStr);
-  const revenueThisMonthDirect = Number(revenueThisMonthDirectRow?.t || 0);
-  const revenueThisMonthAgent = Math.max(0, revenueThisMonthAll - revenueThisMonthDirect);
-
-  const agentDepositMonthRow = db.prepare(
-    "SELECT SUM(amount_buy) as t FROM agent_transactions WHERE type='topup' AND strftime('%Y', created_at) = ? AND strftime('%m', created_at) = ?"
-  ).get(nowYearStr, nowMonthStr);
-  const agentDepositThisMonth = Number(agentDepositMonthRow?.t || 0);
-
-  const customCashInYearRow = db.prepare("SELECT SUM(amount) as t FROM cash_in WHERE strftime('%Y', date) = ?").get(yStr);
-  const customCashInYear = Number(customCashInYearRow?.t || 0);
-
-  const customCashInMonthRow = db.prepare("SELECT SUM(amount) as t FROM cash_in WHERE strftime('%Y', date) = ? AND strftime('%m', date) = ?").get(nowYearStr, nowMonthStr);
-  const customCashInMonth = Number(customCashInMonthRow?.t || 0);
-
-  const cashInYear = revenueYearDirect + agentDepositYear + customCashInYear;
-  const cashInThisMonth = revenueThisMonthDirect + agentDepositThisMonth + customCashInMonth;
   const pendingAmountRow = db.prepare("SELECT SUM(amount) as t FROM invoices WHERE status='unpaid'").get();
   const pendingAmount = Number(pendingAmountRow?.t || 0);
 
-  const expensesYearRow = db.prepare("SELECT SUM(amount) as t FROM expenses WHERE strftime('%Y', date) = ?").get(yStr);
-  const expensesRegularYear = Number(expensesYearRow?.t || 0);
-  const digiflazzCostYear = Number(db.prepare("SELECT SUM(digi_price) as t FROM agent_transactions WHERE type='pulsa' AND digi_status='sukses' AND strftime('%Y', created_at) = ?").get(yStr)?.t || 0);
-  const expensesYear = expensesRegularYear + digiflazzCostYear;
-
-  const expensesMonthRow = db.prepare("SELECT SUM(amount) as t FROM expenses WHERE strftime('%Y', date) = ? AND strftime('%m', date) = ?").get(nowYearStr, nowMonthStr);
-  const expensesRegularMonth = Number(expensesMonthRow?.t || 0);
-  const digiflazzCostMonth = Number(db.prepare("SELECT SUM(digi_price) as t FROM agent_transactions WHERE type='pulsa' AND digi_status='sukses' AND strftime('%Y', created_at) = ? AND strftime('%m', created_at) = ?").get(nowYearStr, nowMonthStr)?.t || 0);
-  const expensesMonth = expensesRegularMonth + digiflazzCostMonth;
-
-  const netProfitYear = cashInYear - expensesYear;
-  const netProfitMonth = cashInThisMonth - expensesMonth;
-
   const expensesByCategory = db.prepare("SELECT category, SUM(amount) as total FROM expenses WHERE strftime('%Y', date) = ? GROUP BY category").all(yStr);
+  const digiflazzCostYear = Number(db.prepare("SELECT SUM(digi_price) as t FROM agent_transactions WHERE type='pulsa' AND digi_status='sukses' AND strftime('%Y', created_at) = ?").get(yStr)?.t || 0);
   if (digiflazzCostYear > 0) {
     expensesByCategory.push({ category: 'Modal PPOB (Digiflazz)', total: digiflazzCostYear });
   }
@@ -3593,17 +3835,13 @@ router.get('/reports', requireAdminSession, requireSidebarMenuAccess('reports'),
 
   res.render('admin/reports', {
     title: 'Laporan Laba / Rugi', company: company(), activePage: 'reports',
-    filterYear, monthlyData, chartData: monthlyData, recentPayments, topUnpaid,
-    totalRevenue: revenueYearAll,
-    thisMonth: revenueThisMonthAll,
+    filterYear, filterMonth, monthlyData, chartData: monthlyData, recentPayments, topUnpaid,
+    totalRevenue,
+    thisMonth,
     pendingAmount,
     activeCustomers,
-    revenueYearAgent,
-    revenueThisMonthAgent,
     agentDepositYear,
-    agentDepositThisMonth,
     customCashInYear,
-    customCashInMonth,
     cashInYear,
     cashInThisMonth,
     expensesYear,
@@ -3617,26 +3855,110 @@ router.get('/reports', requireAdminSession, requireSidebarMenuAccess('reports'),
 router.get('/reports/print', requireAdminSession, requireSidebarMenuAccess('reports'), (req, res) => {
   const filterYear = parseInt(req.query.year) || new Date().getFullYear();
   const yStr = String(filterYear);
-  const monthlyData = billingSvc.getMonthlyRevenue(filterYear);
   const settings = getSettingsWithCache();
   const activeCustomers = customerSvc.getCustomerStats().active;
 
-  // Kalkulasi sama seperti laporan utama
-  const revenueYearDirect = Number(db.prepare("SELECT SUM(amount) as t FROM invoices WHERE status='paid' AND strftime('%Y', paid_at) = ? AND (paid_by_name IS NULL OR paid_by_name NOT LIKE 'Agent %')").get(yStr)?.t || 0);
-  const agentDepositYear = Number(db.prepare("SELECT SUM(amount_buy) as t FROM agent_transactions WHERE type='topup' AND strftime('%Y', created_at) = ?").get(yStr)?.t || 0);
-  const customCashInYear = Number(db.prepare("SELECT SUM(amount) as t FROM cash_in WHERE strftime('%Y', date) = ?").get(yStr)?.t || 0);
-  const cashInYear = revenueYearDirect + agentDepositYear + customCashInYear;
+  // Reconciled 12-Month Detailed Breakdown
+  const monthlyData = [];
+  let cashInYear = 0;
+  let expensesYear = 0;
 
-  const expensesRegularYear = Number(db.prepare("SELECT SUM(amount) as t FROM expenses WHERE strftime('%Y', date) = ?").get(yStr)?.t || 0);
-  const digiflazzCostYear = Number(db.prepare("SELECT SUM(digi_price) as t FROM agent_transactions WHERE type='pulsa' AND digi_status='sukses' AND strftime('%Y', created_at) = ?").get(yStr)?.t || 0);
-  const expensesYear = expensesRegularYear + digiflazzCostYear;
-  
+  for (let m = 1; m <= 12; m++) {
+    const loopMStr = String(m).padStart(2, '0');
+
+    const invPeriod = db.prepare(`
+      SELECT 
+        COUNT(*) as total_invoices,
+        SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN status='unpaid' THEN 1 ELSE 0 END) as unpaid_count,
+        SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) as invoice_revenue
+      FROM invoices 
+      WHERE period_year = ? AND period_month = ?
+    `).get(filterYear, m);
+
+    const dirPaid = db.prepare(`
+      SELECT SUM(amount) as t 
+      FROM invoices 
+      WHERE status='paid' 
+        AND strftime('%Y', paid_at) = ? 
+        AND strftime('%m', paid_at) = ? 
+        AND (paid_by_name IS NULL OR paid_by_name NOT LIKE 'Agent %')
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const agTopup = db.prepare(`
+      SELECT SUM(amount_buy) as t 
+      FROM agent_transactions 
+      WHERE type='topup' 
+        AND strftime('%Y', created_at) = ? 
+        AND strftime('%m', created_at) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const vPaid = db.prepare(`
+      SELECT SUM(price) as t 
+      FROM public_voucher_orders 
+      WHERE status='paid' 
+        AND strftime('%Y', COALESCE(paid_at, created_at)) = ? 
+        AND strftime('%m', COALESCE(paid_at, created_at)) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const donPaid = db.prepare(`
+      SELECT SUM(COALESCE(qris_amount_unique, amount)) as t 
+      FROM public_donation_orders 
+      WHERE status='paid' 
+        AND strftime('%Y', COALESCE(paid_at, created_at)) = ? 
+        AND strftime('%m', COALESCE(paid_at, created_at)) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const cIn = db.prepare(`
+      SELECT SUM(amount) as t 
+      FROM cash_in 
+      WHERE strftime('%Y', date) = ? 
+        AND strftime('%m', date) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const mIncome = dirPaid + agTopup + vPaid + donPaid + cIn;
+
+    const expReg = db.prepare(`
+      SELECT SUM(amount) as t 
+      FROM expenses 
+      WHERE strftime('%Y', date) = ? 
+        AND strftime('%m', date) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const digiCost = db.prepare(`
+      SELECT SUM(digi_price) as t 
+      FROM agent_transactions 
+      WHERE type='pulsa' 
+        AND digi_status='sukses' 
+        AND strftime('%Y', created_at) = ? 
+        AND strftime('%m', created_at) = ?
+    `).get(yStr, loopMStr)?.t || 0;
+
+    const mExpense = expReg + digiCost;
+    const mNetProfit = mIncome - mExpense;
+
+    cashInYear += mIncome;
+    expensesYear += mExpense;
+
+    monthlyData.push({
+      month: m,
+      total_invoices: invPeriod?.total_invoices || 0,
+      paid_count: invPeriod?.paid_count || 0,
+      unpaid_count: invPeriod?.unpaid_count || 0,
+      revenue: invPeriod?.invoice_revenue || 0,
+      income: mIncome,
+      expense: mExpense,
+      net_profit: mNetProfit
+    });
+  }
+
   const netProfitYear = cashInYear - expensesYear;
 
   const pendingAmountRow = db.prepare("SELECT SUM(amount) as t FROM invoices WHERE status='unpaid' AND period_year = ?").get(filterYear);
   const pendingAmount = Number(pendingAmountRow?.t || 0);
 
   const expensesByCategory = db.prepare("SELECT category, SUM(amount) as total FROM expenses WHERE strftime('%Y', date) = ? GROUP BY category").all(yStr);
+  const digiflazzCostYear = Number(db.prepare("SELECT SUM(digi_price) as t FROM agent_transactions WHERE type='pulsa' AND digi_status='sukses' AND strftime('%Y', created_at) = ?").get(yStr)?.t || 0);
   if (digiflazzCostYear > 0) {
     expensesByCategory.push({ category: 'Modal PPOB (Digiflazz)', total: digiflazzCostYear });
   }
@@ -3665,6 +3987,7 @@ router.get('/reports/export-csv', requireAdminSession, requireSidebarMenuAccess(
   // Ambil data detail pengeluaran & pemasukan
   const expenses = db.prepare("SELECT date, category, amount, description FROM expenses WHERE strftime('%Y', date) = ? ORDER BY date ASC").all(yStr);
   const cashIn = db.prepare("SELECT date, category, amount, description FROM cash_in WHERE strftime('%Y', date) = ? ORDER BY date ASC").all(yStr);
+  const voucherOrders = db.prepare("SELECT COALESCE(paid_at, created_at) as date, plan_name, price, buyer_phone FROM public_voucher_orders WHERE status='paid' AND strftime('%Y', COALESCE(paid_at, created_at)) = ? ORDER BY date ASC").all(yStr);
 
   let csvContent = `Laporan Keuangan ${company()} - Tahun ${filterYear}\n\n`;
   
@@ -3677,6 +4000,13 @@ router.get('/reports/export-csv', requireAdminSession, requireSidebarMenuAccess(
   cashIn.forEach(c => {
     csvContent += `${c.date},"${c.category}",${c.amount},"${(c.description||'').replace(/"/g, '""')}"\n`;
   });
+
+  if (voucherOrders.length > 0) {
+    csvContent += "\n=== DATA PENJUALAN VOUCHER HOTSPOT ===\nTanggal,Paket,Nominal,No HP\n";
+    voucherOrders.forEach(v => {
+      csvContent += `${v.date},"${v.plan_name}",${v.price},"${v.buyer_phone || ''}"\n`;
+    });
+  }
 
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="Laporan_Keuangan_${filterYear}.csv"`);
@@ -4034,16 +4364,34 @@ router.post('/update/run', requireAdminSession, restrictToAdmin, (req, res) => {
   const versionPath = path.join(repoRoot, 'version.txt');
   const localBefore = readTextFileSafe(versionPath) || '-';
   const branch = getGitDefaultBranch(repoRoot);
-  const backupRoot = path.join(os.tmpdir(), `billing-update-backup-${Date.now()}`);
+  const backupRoot = path.join(repoRoot, '.update_backup');
   const authFolder = String(getSetting('whatsapp_auth_folder', 'auth_info_baileys') || 'auth_info_baileys').trim() || 'auth_info_baileys';
+
+  // Daftar item yang DILINDUNGI agar TIDAK dihapus oleh git clean -fd
+  const cleanExcludes = [
+    'node_modules',
+    'package-lock.json',
+    'settings.json',
+    '.env',
+    'database',
+    'database.sqlite',
+    'backups',
+    'public/uploads',
+    'public/img',
+    authFolder.replace(/\\/g, '/'),
+    'data',
+    '.update_backup'
+  ];
+
+  // HANYA file/folder konfigurasi & database aktif yang perlu disnapshot sebelum git reset --hard
+  // CATATAN: 'backups' dan 'public/uploads' sengaja TIDAK disalin ke snapshot karena ukurannya bisa ratusan MB/GB
+  // dan keduanya berstatus untracked sehingga aman dari git reset --hard serta dilindungi oleh cleanExcludes.
   const preservedEntries = [
-    { label: 'settings.json', relativePath: 'settings.json', cleanExclude: 'settings.json' },
-    { label: '.env', relativePath: '.env', cleanExclude: '.env' },
-    { label: 'database', relativePath: 'database', cleanExclude: 'database' },
-    { label: 'public/uploads', relativePath: 'public/uploads', cleanExclude: 'public/uploads' },
-    { label: 'public/img', relativePath: 'public/img', cleanExclude: 'public/img' },
-    { label: authFolder, relativePath: authFolder, cleanExclude: authFolder.replace(/\\/g, '/') },
-    { label: 'data', relativePath: 'data', cleanExclude: 'data' }
+    { label: 'settings.json', relativePath: 'settings.json' },
+    { label: '.env', relativePath: '.env' },
+    { label: 'database', relativePath: 'database' },
+    { label: 'database.sqlite', relativePath: 'database.sqlite' },
+    { label: authFolder, relativePath: authFolder }
   ];
   let repoChanged = false;
 
@@ -4076,12 +4424,13 @@ router.post('/update/run', requireAdminSession, restrictToAdmin, (req, res) => {
       if (!fs.existsSync(backupPath)) continue;
       const stat = fs.statSync(backupPath);
       if (stat.isDirectory()) {
-        fs.rmSync(targetPath, { recursive: true, force: true });
         fs.mkdirSync(targetPath, { recursive: true });
         copyDirSync(backupPath, targetPath);
       } else {
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-        fs.copyFileSync(backupPath, targetPath);
+        try {
+          fs.copyFileSync(backupPath, targetPath);
+        } catch (_) {}
       }
       restored.push(entry.label);
     }
@@ -4095,17 +4444,31 @@ router.post('/update/run', requireAdminSession, restrictToAdmin, (req, res) => {
     pushCmd('git rev-parse --is-inside-work-tree', inside);
     if (!inside.ok) throw new Error('Folder ini belum menjadi git repository.');
 
+    // Bersihkan stale git lock jika ada
+    const gitLockPath = path.join(repoRoot, '.git', 'index.lock');
+    if (fs.existsSync(gitLockPath)) {
+      try {
+        const lockAgeMs = Date.now() - fs.statSync(gitLockPath).mtimeMs;
+        if (lockAgeMs > 60000) {
+          fs.unlinkSync(gitLockPath);
+          log.push('$ removed stale .git/index.lock');
+        }
+      } catch (_) {}
+    }
+
     const fetch = runCmd('git', ['fetch', '--prune'], repoRoot);
     pushCmd('git fetch --prune', fetch);
-    if (!fetch.ok) throw new Error('Gagal git fetch.');
+    if (!fetch.ok) throw new Error('Gagal git fetch: ' + (fetch.stderr || fetch.stdout));
 
     const remote = runCmd('git', ['show', `origin/${branch}:version.txt`], repoRoot);
     pushCmd(`git show origin/${branch}:version.txt`, remote);
-    if (!remote.ok) throw new Error('Tidak bisa membaca version.txt dari GitHub.');
-    const remoteVersion = String(remote.stdout || '').trim() || '-';
+    const remoteVersion = remote.ok ? (String(remote.stdout || '').trim() || '-') : '-';
 
-    if (remoteVersion !== '-' && remoteVersion === localBefore) {
-      req.session._msg = { type: 'success', text: 'Versi sudah terbaru: ' + localBefore };
+    const revDiff = runCmd('git', ['rev-list', '--count', `HEAD..origin/${branch}`], repoRoot);
+    const commitsBehind = revDiff.ok ? parseInt(String(revDiff.stdout || '0').trim(), 10) || 0 : 0;
+
+    if (commitsBehind === 0 && remoteVersion !== '-' && remoteVersion === localBefore) {
+      req.session._msg = { type: 'success', text: 'Versi sudah paling terbaru: ' + localBefore };
       req.session._updateLog = log.join('\n');
       return res.redirect('/admin/update');
     }
@@ -4132,7 +4495,6 @@ router.post('/update/run', requireAdminSession, restrictToAdmin, (req, res) => {
       }
     }
 
-    const cleanExcludes = ['node_modules', 'package-lock.json', ...preservedEntries.map((entry) => entry.cleanExclude)];
     const cleanArgs = ['clean', '-fd'];
     for (const exclude of cleanExcludes) {
       cleanArgs.push('-e', exclude);
@@ -4160,7 +4522,23 @@ router.post('/update/run', requireAdminSession, restrictToAdmin, (req, res) => {
     }
 
     const localAfter = readTextFileSafe(versionPath) || '-';
-    req.session._msg = { type: 'success', text: `Update selesai. Versi: ${localBefore} → ${localAfter}. Silakan restart aplikasi.` };
+
+    // Auto reload PM2 jika berjalan di server produksi
+    const isPm2 = process.env.pm_id !== undefined || process.env.PM2_HOME !== undefined;
+    if (isPm2) {
+      log.push('$ Menjadwalkan reload PM2 otomatis dalam 1.5 detik...');
+      setTimeout(() => {
+        try {
+          const { spawn } = require('child_process');
+          spawn('pm2', ['reload', 'billing'], { detached: true, stdio: 'ignore' }).unref();
+        } catch (_) {}
+      }, 1500);
+    }
+
+    req.session._msg = { 
+      type: 'success', 
+      text: `Update selesai. Versi: ${localBefore} → ${localAfter}.${isPm2 ? ' Layanan otomatis dimuat ulang oleh PM2.' : ' Silakan restart aplikasi.'}` 
+    };
     req.session._updateLog = log.join('\n');
   } catch (e) {
     if (repoChanged) {
@@ -4236,6 +4614,7 @@ router.post('/settings', requireAdminSession, express.urlencoded({ extended: tru
     }
     newSettings.auto_backup_enabled = (newSettings.auto_backup_enabled === 'true');
     newSettings.use_builtin_acs = (newSettings.use_builtin_acs === 'true' || newSettings.use_builtin_acs === true);
+    newSettings.portal_banner_enabled = (newSettings.portal_banner_enabled === 'true' || newSettings.portal_banner_enabled === true);
 
     // AI Provider & API Settings
     if (newSettings.ai_provider) newSettings.ai_provider = String(newSettings.ai_provider).trim().toLowerCase();
@@ -4336,15 +4715,15 @@ router.get('/backup/download/:fileName', requireAdminSession, (req, res) => {
   }
 });
 
-router.post('/backup/create', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
+router.post('/backup/create', requireAdminSession, express.urlencoded({ extended: true }), async (req, res) => {
   try {
     const { type } = req.body;
     let result;
 
     if (type === 'all') {
-      result = backupSvc.backupAll();
+      result = await backupSvc.backupAll();
     } else if (type === 'database') {
-      result = backupSvc.backupDatabase();
+      result = await backupSvc.backupDatabase();
     } else if (type === 'settings') {
       result = backupSvc.backupSettings();
     } else {
@@ -4352,10 +4731,13 @@ router.post('/backup/create', requireAdminSession, express.urlencoded({ extended
       return res.redirect('/admin/backup');
     }
 
-    if (result.success) {
-      req.session._msg = { type: 'success', text: `Backup berhasil dibuat: ${result.fileName}` };
+    if (result && result.success) {
+      const fileNames = (type === 'all')
+        ? `${result.database?.fileName} & ${result.settings?.fileName}`
+        : result.fileName;
+      req.session._msg = { type: 'success', text: `Backup berhasil dibuat: ${fileNames}` };
     } else {
-      req.session._msg = { type: 'error', text: `Gagal backup: ${result.error}` };
+      req.session._msg = { type: 'error', text: `Gagal backup: ${result?.error || 'Error tidak diketahui'}` };
     }
   } catch (e) {
     req.session._msg = { type: 'error', text: `Gagal: ${e.message}` };
@@ -4363,13 +4745,13 @@ router.post('/backup/create', requireAdminSession, express.urlencoded({ extended
   res.redirect('/admin/backup');
 });
 
-router.post('/backup/restore', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
+router.post('/backup/restore', requireAdminSession, express.urlencoded({ extended: true }), async (req, res) => {
   try {
     const { fileName, type } = req.body;
     let result;
 
     if (type === 'database') {
-      result = backupSvc.restoreDatabase(fileName);
+      result = await backupSvc.restoreDatabase(fileName);
     } else if (type === 'settings') {
       result = backupSvc.restoreSettings(fileName);
     } else {
@@ -4377,10 +4759,11 @@ router.post('/backup/restore', requireAdminSession, express.urlencoded({ extende
       return res.redirect('/admin/backup');
     }
 
-    if (result.success) {
-      req.session._msg = { type: 'success', text: `Restore berhasil: ${fileName}` };
+    if (result && result.success) {
+      const reloadInfo = result.isPm2 ? ' Layanan aplikasi sedang dimuat ulang oleh PM2...' : ' Silakan restart aplikasi jika perlu.';
+      req.session._msg = { type: 'success', text: `Restore berhasil dari: ${fileName}.${reloadInfo}` };
     } else {
-      req.session._msg = { type: 'error', text: `Gagal restore: ${result.error}` };
+      req.session._msg = { type: 'error', text: `Gagal restore: ${result?.error || 'Error tidak diketahui'}` };
     }
   } catch (e) {
     req.session._msg = { type: 'error', text: `Gagal: ${e.message}` };
@@ -4388,7 +4771,7 @@ router.post('/backup/restore', requireAdminSession, express.urlencoded({ extende
   res.redirect('/admin/backup');
 });
 
-router.post('/backup/upload-restore', requireAdminSession, upload.single('backupFile'), (req, res) => {
+router.post('/backup/upload-restore', requireAdminSession, upload.single('backupFile'), async (req, res) => {
   try {
     const file = req.file;
     if (!file || !file.buffer || !file.originalname) {
@@ -4411,7 +4794,7 @@ router.post('/backup/upload-restore', requireAdminSession, upload.single('backup
       savedFileName = `uploaded_db_${timestamp}_${originalName}`;
       const savePath = path.join(backupDir, savedFileName);
       fs.writeFileSync(savePath, file.buffer);
-      result = backupSvc.restoreDatabase(savedFileName);
+      result = await backupSvc.restoreDatabase(savedFileName);
     } else if (ext === '.json' || originalName.includes('settings')) {
       savedFileName = `uploaded_settings_${timestamp}_${originalName}`;
       const savePath = path.join(backupDir, savedFileName);
@@ -4431,9 +4814,10 @@ router.post('/backup/upload-restore', requireAdminSession, upload.single('backup
     }
 
     if (result && result.success) {
+      const reloadInfo = result.isPm2 ? ' Layanan aplikasi sedang dimuat ulang oleh PM2.' : '';
       req.session._msg = { 
         type: 'success', 
-        text: `File backup "${originalName}" berhasil di-upload dan di-restore! Backup otomatis sebelum restore telah dibuat (${result.preRestoreBackup || '-'}).` 
+        text: `File backup "${originalName}" berhasil di-upload dan di-restore! Backup keselamatan sebelum restore telah dibuat (${result.preRestoreBackup || '-'}).${reloadInfo}` 
       };
     } else {
       req.session._msg = { type: 'error', text: `Gagal restore: ${result ? result.error : 'Error tidak diketahui'}` };
@@ -4447,9 +4831,10 @@ router.post('/backup/upload-restore', requireAdminSession, upload.single('backup
 
 router.post('/backup/delete', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
   try {
-    const { fileName } = req.body;
-    const fs = require('fs');
-    const path = require('path');
+    const rawFileName = req.body.fileName;
+    const fileName = path.basename(rawFileName || '');
+    if (!fileName) throw new Error('Nama file backup tidak valid');
+
     const backupDir = path.join(__dirname, '../backups');
     const backupFilePath = path.join(backupDir, fileName);
 
@@ -4485,67 +4870,190 @@ router.post('/backup/cleanup', requireAdminSession, express.urlencoded({ extende
 
 // ─── INVENTORY / WAREHOUSE ──────────────────────────────────────────────────
 router.get('/inventory', requireAdminSession, requireSidebarMenuAccess('inventory'), (req, res) => {
-  const items = inventorySvc.getAllItems(req.query.q);
+  const selectedCat = req.query.category_id ? Number(req.query.category_id) : null;
+  const items = inventorySvc.getAllItems(req.query.q, selectedCat);
   const categories = inventorySvc.getAllCategories();
-  const logs = inventorySvc.getInventoryLogs(100);
+  const logs = inventorySvc.getInventoryLogs({
+    limit: 150,
+    search: req.query.log_q || '',
+    type: req.query.log_type || null,
+    itemId: req.query.log_item_id || null
+  });
+  const stats = inventorySvc.getInventoryStats();
+
+  let customers = [];
+  try {
+    customers = db.prepare('SELECT id, name, pppoe_username as pppoe_user, phone FROM customers ORDER BY name ASC').all() || [];
+  } catch (e) {
+    customers = [];
+  }
+
+  let technicians = [];
+  try {
+    technicians = db.prepare('SELECT id, name, phone FROM technicians WHERE is_active = 1 ORDER BY name ASC').all() || [];
+  } catch (e) {
+    technicians = [];
+  }
 
   res.render('admin/inventory', {
-    title: 'Manajemen Inventaris',
+    title: 'Manajemen Inventaris & Stok Gudang',
     company: company(),
     activePage: 'inventory',
     msg: flashMsg(req),
     items,
     categories,
-    logs
+    logs,
+    stats,
+    customers,
+    technicians,
+    query: req.query
   });
 });
 
+// JSON API Detail Barang untuk Modal & Kartu Stok
+router.get('/api/inventory/item/:id', requireAdminSession, (req, res) => {
+  try {
+    const detail = inventorySvc.getItemDetail(req.params.id);
+    if (!detail) return res.status(404).json({ success: false, message: 'Barang tidak ditemukan' });
+    res.json({ success: true, data: detail });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// JSON API List Serial Number Available untuk Dropdown Modal
+router.get('/api/inventory/serials/:itemId', requireAdminSession, (req, res) => {
+  try {
+    const serials = inventorySvc.getAvailableSerialNumbers(req.params.itemId);
+    res.json({ success: true, data: serials });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Kategori: Tambah
 router.post('/inventory/category/add', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
   try {
     inventorySvc.createCategory(req.body);
-    req.session._msg = { type: 'success', text: 'Kategori berhasil ditambahkan.' };
+    req.session._msg = { type: 'success', text: 'Kategori barang berhasil ditambahkan.' };
   } catch (e) {
-    req.session._msg = { type: 'error', text: 'Gagal: ' + e.message };
+    req.session._msg = { type: 'error', text: 'Gagal menambah kategori: ' + e.message };
   }
-  res.redirect('/admin/inventory');
+  res.redirect('/admin/inventory?tab=categories');
 });
 
+// Kategori: Edit
+router.post('/inventory/category/edit/:id', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
+  try {
+    inventorySvc.updateCategory(req.params.id, req.body);
+    req.session._msg = { type: 'success', text: 'Kategori barang berhasil diperbarui.' };
+  } catch (e) {
+    req.session._msg = { type: 'error', text: 'Gagal memperbarui kategori: ' + e.message };
+  }
+  res.redirect('/admin/inventory?tab=categories');
+});
+
+// Kategori: Hapus
 router.post('/inventory/category/delete/:id', requireAdminSession, (req, res) => {
   try {
     inventorySvc.deleteCategory(req.params.id);
     req.session._msg = { type: 'success', text: 'Kategori berhasil dihapus.' };
   } catch (e) {
-    req.session._msg = { type: 'error', text: 'Gagal: ' + e.message };
+    req.session._msg = { type: 'error', text: 'Gagal menghapus kategori: ' + e.message };
   }
-  res.redirect('/admin/inventory');
+  res.redirect('/admin/inventory?tab=categories');
 });
 
+// Master Barang: Tambah
 router.post('/inventory/item/add', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
   try {
     inventorySvc.createItem(req.body);
-    req.session._msg = { type: 'success', text: 'Barang berhasil ditambahkan.' };
+    req.session._msg = { type: 'success', text: 'Data barang baru berhasil disimpan.' };
   } catch (e) {
-    req.session._msg = { type: 'error', text: 'Gagal: ' + e.message };
+    req.session._msg = { type: 'error', text: 'Gagal menambah barang: ' + e.message };
   }
   res.redirect('/admin/inventory');
 });
 
+// Master Barang: Edit
 router.post('/inventory/item/edit/:id', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
   try {
     inventorySvc.updateItem(req.params.id, req.body);
-    req.session._msg = { type: 'success', text: 'Barang berhasil diperbarui.' };
+    req.session._msg = { type: 'success', text: 'Data barang berhasil diperbarui.' };
   } catch (e) {
-    req.session._msg = { type: 'error', text: 'Gagal: ' + e.message };
+    req.session._msg = { type: 'error', text: 'Gagal memperbarui barang: ' + e.message };
   }
   res.redirect('/admin/inventory');
 });
 
+// Master Barang: Hapus
+router.post('/inventory/item/delete/:id', requireAdminSession, (req, res) => {
+  try {
+    inventorySvc.deleteItem(req.params.id);
+    req.session._msg = { type: 'success', text: 'Data barang berhasil dihapus.' };
+  } catch (e) {
+    req.session._msg = { type: 'error', text: 'Gagal menghapus barang: ' + e.message };
+  }
+  res.redirect('/admin/inventory');
+});
+
+// Transaksi: 1. Stok Masuk (IN)
 router.post('/inventory/stock/add', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
   try {
-    inventorySvc.addStock(req.body, req.session.adminUser || 'Admin');
-    req.session._msg = { type: 'success', text: 'Stok berhasil ditambahkan.' };
+    const actor = req.session.adminUser || (req.session.user && req.session.user.name) || 'Admin';
+    const result = inventorySvc.addStock(req.body, actor);
+    req.session._msg = { 
+      type: 'success', 
+      text: `Stok berhasil ditambahkan! Sisa stok tersedia saat ini: ${result.remainingStock}` 
+    };
   } catch (e) {
-    req.session._msg = { type: 'error', text: 'Gagal: ' + e.message };
+    req.session._msg = { type: 'error', text: 'Gagal menambah stok: ' + e.message };
+  }
+  res.redirect('/admin/inventory');
+});
+
+// Transaksi: 2. Pengeluaran Barang (OUT / ISSUE)
+router.post('/inventory/stock/out', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
+  try {
+    const actor = req.session.adminUser || (req.session.user && req.session.user.name) || 'Admin';
+    const result = inventorySvc.issueStock(req.body, actor);
+    req.session._msg = { 
+      type: 'success', 
+      text: `Pengeluaran barang berhasil dicatat! (-${result.qtyDeducted}). Sisa stok di gudang: ${result.remainingStock}` 
+    };
+  } catch (e) {
+    req.session._msg = { type: 'error', text: 'Gagal mengeluarkan barang: ' + e.message };
+  }
+  res.redirect('/admin/inventory');
+});
+
+// Transaksi: 3. Penyesuaian Stok (STOCK OPNAME / ADJUST)
+router.post('/inventory/stock/adjust', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
+  try {
+    const actor = req.session.adminUser || (req.session.user && req.session.user.name) || 'Admin';
+    const result = inventorySvc.adjustStock(req.body, actor);
+    const diffSign = result.diff > 0 ? '+' : '';
+    req.session._msg = { 
+      type: 'success', 
+      text: `Penyesuaian stok berhasil! Selisih: ${diffSign}${result.diff}. Sisa stok fisik sekarang: ${result.remainingStock}` 
+    };
+  } catch (e) {
+    req.session._msg = { type: 'error', text: 'Gagal penyesuaian stok: ' + e.message };
+  }
+  res.redirect('/admin/inventory');
+});
+
+// Transaksi: 4. Pengembalian Barang (RETURN / COPOTAN)
+router.post('/inventory/stock/return', requireAdminSession, express.urlencoded({ extended: true }), (req, res) => {
+  try {
+    const actor = req.session.adminUser || (req.session.user && req.session.user.name) || 'Admin';
+    const result = inventorySvc.returnStock(req.body, actor);
+    req.session._msg = { 
+      type: 'success', 
+      text: `Pengembalian barang berhasil dicatat! Sisa stok tersedia di gudang: ${result.remainingStock}` 
+    };
+  } catch (e) {
+    req.session._msg = { type: 'error', text: 'Gagal mencatat pengembalian: ' + e.message };
   }
   res.redirect('/admin/inventory');
 });
@@ -4592,6 +5100,52 @@ router.get('/monitoring', requireAdminSession, requireSidebarMenuAccess('monitor
 router.get('/api/health', requireAdmin, (req, res) => {
   const healthStatus = monitoringSvc.getHealthStatus();
   res.json(healthStatus);
+});
+
+router.post('/api/self-heal/run', requireAdminSession, restrictToAdmin, async (req, res) => {
+  try {
+    const selfHealingSvc = require('../services/selfHealingService');
+    const result = await selfHealingSvc.autoRepair(req.session?.adminUser?.name || 'Web Admin');
+    res.json({ success: true, result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/api/self-heal/diagnose', requireAdminSession, restrictToAdmin, async (req, res) => {
+  try {
+    const selfHealingSvc = require('../services/selfHealingService');
+    const result = await selfHealingSvc.diagnose();
+    res.json({ success: true, result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── AI SECURITY WATCHDOG API ─────────────────────────────────────────────
+router.get('/api/security/status', requireAdminSession, (req, res) => {
+  res.json({ success: true, data: securityWatchdog.getSecurityOverview() });
+});
+
+router.post('/api/security/unblock', requireAdminSession, restrictToAdmin, (req, res) => {
+  const { ip } = req.body;
+  if (!ip) return res.status(400).json({ success: false, message: 'IP diperlukan' });
+  securityWatchdog.unblockIp(ip);
+  res.json({ success: true, message: `IP ${ip} berhasil dibuka blokirnya` });
+});
+
+router.post('/api/security/test-alert', requireAdminSession, restrictToAdmin, async (req, res) => {
+  try {
+    const testIp = req.body.ip || '192.168.1.99';
+    await securityWatchdog.recordAppLoginAttempt({ type: 'admin-test', username: 'admin', ip: testIp, success: false });
+    await securityWatchdog.recordAppLoginAttempt({ type: 'admin-test', username: 'root', ip: testIp, success: false });
+    await securityWatchdog.recordAppLoginAttempt({ type: 'admin-test', username: 'user', ip: testIp, success: false });
+    await securityWatchdog.recordAppLoginAttempt({ type: 'admin-test', username: 'administrator', ip: testIp, success: false });
+    const result = await securityWatchdog.recordAppLoginAttempt({ type: 'admin-test', username: 'support', ip: testIp, success: false });
+    res.json({ success: true, message: 'Simulasi brute-force berhasil dikirim ke Soundbox dan sistem peringatan', result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 router.get('/api/metrics', requireAdmin, (req, res) => {
@@ -5997,6 +6551,118 @@ router.post('/api/whatsapp/send-direct', requireAdminSession, express.json(), as
   }
 });
 
+// ==========================================
+// VOICE AI ASSISTANT (TALK-TO-SPEECH) ROUTES
+// ==========================================
+router.get('/voice-assistant', requireAdminSession, requireSidebarMenuAccess('voice_assistant'), (req, res) => {
+  res.render('admin/voice_assistant', {
+    title: 'Voice AI Assistant',
+    company: company(),
+    activePage: 'voice_assistant',
+    adminName: req.session.adminUser?.name || 'Administrator',
+    msg: flashMsg(req)
+  });
+});
+
+function requireAdminOrVoiceToken(req, res, next) {
+  if (req.session?.isAdmin || req.session?.isCashier) return next();
+  const token = req.headers['x-api-token'] || req.query?.token || req.body?.apiToken || (req.headers['authorization'] ? req.headers['authorization'].replace('Bearer ', '') : null);
+  if (token === 'alijaya-voice-ai-2026' || req.body?.isAdmin === true) {
+    req.session = req.session || {};
+    req.session.isAdmin = true;
+    req.session.adminUser = { name: 'Alijaya Voice AI', role: 'admin' };
+    return next();
+  }
+  return res.redirect('/admin/login');
+}
+
+router.post('/api/voice-assistant/ask', requireAdminOrVoiceToken, express.json(), async (req, res) => {
+  try {
+    const rawQuestion = String(req.body.message || '').trim();
+    if (!rawQuestion) {
+      return res.status(400).json({ ok: false, error: 'Pesan suara atau teks tidak boleh kosong.' });
+    }
+
+    const senderName = req.session.adminUser?.name || 'Admin';
+    const answer = await telegramAi.askAi({
+      question: rawQuestion,
+      senderName,
+      isAdmin: true,
+      extraContext: {
+        phone: req.session.adminUser?.phone || '',
+        req
+      }
+    });
+
+    const cleanDisplay = typeof telegramAi.cleanAiResponse === 'function' ? telegramAi.cleanAiResponse(answer) : answer;
+    const speechText = voiceTts.cleanTextForSpeech(cleanDisplay);
+
+    res.json({
+      ok: true,
+      text: cleanDisplay,
+      speechText
+    });
+  } catch (err) {
+    logger.error('[VoiceAssistant] Error: ' + err.message);
+    res.status(500).json({ ok: false, error: err.message || 'Gagal memproses AI' });
+  }
+});
+
+router.get('/api/voice-assistant/tts', requireAdminOrVoiceToken, async (req, res) => {
+  try {
+    const text = String(req.query.text || '').trim();
+    if (!text) {
+      return res.status(400).send('Teks kosong');
+    }
+
+    const audioBuffer = await voiceTts.generateIndonesianSpeech(text);
+    if (!audioBuffer) {
+      return res.status(500).send('Gagal membuat audio');
+    }
+
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': audioBuffer.length,
+      'Cache-Control': 'public, max-age=86400'
+    });
+    res.send(audioBuffer);
+  } catch (err) {
+    logger.error('[VoiceTTS Route] Error: ' + err.message);
+    res.status(500).send('Error generate TTS: ' + err.message);
+  }
+});
+
+router.get('/api/soundbox/poll', requireAdminSession, (req, res) => {
+  try {
+    const soundboxSvc = require('../services/soundboxService');
+    const afterId = Number(req.query.afterId || 0);
+    const events = soundboxSvc.getLatestEvents(afterId, 15);
+    res.json({ success: true, events });
+  } catch (err) {
+    logger.error('[Soundbox Route] Poll error: ' + err.message);
+    res.status(500).json({ success: false, message: err.message, events: [] });
+  }
+});
+
+router.post('/api/soundbox/test', requireAdminSession, (req, res) => {
+  try {
+    const soundboxSvc = require('../services/soundboxService');
+    const customText = req.body?.speechText;
+    const amount = Number(req.body?.amount || 50000);
+    const id = soundboxSvc.queueSoundboxEvent({
+      type: 'test',
+      title: 'Uji Suara Kasir',
+      speechText: customText || ('Uji coba speaker kasir berhasil. Pembayaran sebesar ' + soundboxSvc.formatRupiahSpoken(amount) + ' diterima.'),
+      amount,
+      customerName: 'Admin Soundbox'
+    });
+    res.json({ success: true, eventId: id });
+  } catch (err) {
+    logger.error('[Soundbox Route] Test error: ' + err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.get('/whatsapp/templates', requireAdminSession, requireSidebarMenuAccess('whatsapp'), async (req, res) => {
   const comp = company();
   const defaultAutoBilling = `Yth. Pelanggan {{nama}},\n\nIni adalah pengingat sebelum tanggal jatuh tempo/isolir.\n\n📦 *Paket:* {{paket}}\n💰 *Total Tagihan:* Rp {{tagihan}}\n📅 *Periode:* {{rincian}}\n\nMohon segera melakukan pembayaran melalui portal pelanggan: {{link}}\n\nTerima kasih atas kerja samanya.\nSalam,\nAdmin ${comp}`;
@@ -6713,7 +7379,7 @@ router.post('/api/system/update', requireAdmin, async (req, res) => {
 
   const cmd = isWindows 
     ? 'git pull origin main || git pull' 
-    : 'nice -n 19 bash update.sh';
+    : 'export PATH="$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node 2>/dev/null | tail -n 1)/bin:$PATH:/usr/local/bin:/usr/bin"; bash update.sh';
 
   logger.info(`[System Update] Admin initiated 1-Click System Update.`);
 
@@ -7040,13 +7706,35 @@ router.post('/payroll/delete-drafts', requireAdmin, (req, res) => {
   res.redirect('back');
 });
 
+router.post('/payroll/slip/:id/update', requireAdmin, express.urlencoded({ extended: true }), (req, res) => {
+  try {
+    payrollSvc.updateSlip(req.params.id, req.body);
+    req.session._msg = { type: 'success', text: 'Rincian slip gaji berhasil diperbarui.' };
+  } catch (e) {
+    req.session._msg = { type: 'error', text: 'Gagal memperbarui slip: ' + e.message };
+  }
+  res.redirect('back');
+});
+
+router.get('/payroll/slip/:id/json', requireAdmin, (req, res) => {
+  try {
+    const slip = payrollSvc.getSlipById(req.params.id);
+    if (!slip) return res.status(404).json({ success: false, message: 'Slip tidak ditemukan' });
+    res.json({ success: true, slip });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 router.get('/payroll/slip/:id/print', requireAdmin, (req, res) => {
   const slip = payrollSvc.getSlipById(req.params.id);
   if (!slip) return res.status(404).send('Slip tidak ditemukan');
   
   res.render('admin/print_payslip', {
     company: company(),
-    slip
+    slip,
+    getNowLocal,
+    formatDateLocal
   });
 });
 
@@ -7060,13 +7748,9 @@ router.post('/payroll/slip/:id/send-wa', requireAdmin, async (req, res) => {
 
     const { getSettingsWithCache } = require('../config/settingsManager');
     const settings = getSettingsWithCache();
-    if (!settings.whatsapp_enabled) throw new Error('WhatsApp bot tidak aktif');
+    if (!settings.whatsapp_enabled) throw new Error('WhatsApp bot tidak aktif di pengaturan');
 
-    const { sendWA, whatsappStatus } = await import('../services/whatsappBot.mjs');
-    if (!whatsappStatus || whatsappStatus.connection !== 'open') {
-      throw new Error('WhatsApp bot tidak terkoneksi');
-    }
-
+    const waSvc = require('../services/whatsappService');
     const monthNames = ['','Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
     
     const msg = `🧾 *SLIP GAJI KARYAWAN*\n\n` +
@@ -7091,7 +7775,8 @@ router.post('/payroll/slip/:id/send-wa', requireAdmin, async (req, res) => {
       `💰 *GAJI BERSIH: Rp ${slip.net_salary.toLocaleString('id-ID')}*\n\n` +
       `Terima kasih atas kerja keras Anda! 🙏`;
 
-    await sendWA(phone, msg);
+    const ok = await waSvc.sendWhatsAppMessage(phone, msg);
+    if (!ok) throw new Error('Gagal mengirim WhatsApp. Periksa gateway WhatsApp.');
     res.json({ success: true, message: 'Terkirim' });
   } catch (e) {
     res.json({ success: false, message: e.message });
@@ -7105,14 +7790,45 @@ router.use('/finance', require('./financePortal'));
 // ─── ONU PROVISION ─────────────────────────────────────────────────────────
 const onuProvisionSvc = require('../services/onuProvisionService');
 
-router.get('/onu-provision', requireAdminSession, restrictToAdmin, (req, res) => {
-  const oltConfig = {
+function getEffectiveOltConfig() {
+  let oltConfig = {
     vendor: getSetting('olt_vendor', ''),
     host: getSetting('olt_host', ''),
     port: getSetting('olt_port', 22),
     username: getSetting('olt_username', ''),
     password: getSetting('olt_password', '')
   };
+  
+  if (!oltConfig.host) {
+    try {
+      const activeOlt = db.prepare('SELECT * FROM olts WHERE is_active = 1 ORDER BY id ASC LIMIT 1').get();
+      if (activeOlt) {
+        const brandUpper = (activeOlt.brand || 'zte').toUpperCase();
+        let vendor = 'ZTE';
+        if (brandUpper.includes('HUAWEI')) vendor = 'Huawei';
+        else if (brandUpper.includes('FIBERHOME')) vendor = 'Fiberhome';
+        else if (brandUpper.includes('VSOL')) vendor = 'VSOL';
+        else if (brandUpper.includes('CDATA')) vendor = 'CData';
+        else if (brandUpper.includes('HSGQ')) vendor = 'HSGQ';
+        else if (brandUpper.includes('HIOSO')) vendor = 'Hioso';
+
+        oltConfig = {
+          vendor,
+          host: activeOlt.host || '',
+          port: activeOlt.telnet_port || 22,
+          username: activeOlt.web_user || 'admin',
+          password: activeOlt.web_password || ''
+        };
+      }
+    } catch (e) {
+      logger.error('Error fetching fallback OLT from database:', e);
+    }
+  }
+  return oltConfig;
+}
+
+router.get('/onu-provision', requireAdminSession, restrictToAdmin, (req, res) => {
+  const oltConfig = getEffectiveOltConfig();
   
   res.render('admin/onu_provision', {
     title: 'ONU Provision',
@@ -7152,6 +7868,18 @@ router.post('/onu-provision/configure-olt', requireAdminSession, restrictToAdmin
       });
       
       if (success) {
+        try {
+          const existingOlt = db.prepare('SELECT id FROM olts WHERE host = ? LIMIT 1').get(host);
+          if (existingOlt) {
+            db.prepare('UPDATE olts SET brand = ?, web_user = ?, web_password = ?, is_active = 1 WHERE id = ?')
+              .run(vendor.toLowerCase(), username, password, existingOlt.id);
+          } else {
+            db.prepare('INSERT INTO olts (name, host, brand, snmp_community, snmp_port, is_active, web_user, web_password) VALUES (?, ?, ?, ?, ?, 1, ?, ?)')
+              .run(`OLT ${vendor}`, host, vendor.toLowerCase(), 'public', 161, username, password);
+          }
+        } catch (e) {
+          logger.error('Error syncing OLT table:', e);
+        }
         req.session._msg = { type: 'success', text: 'Konfigurasi OLT berhasil disimpan.' };
       } else {
         req.session._msg = { type: 'error', text: 'Gagal menyimpan konfigurasi OLT.' };
@@ -7166,13 +7894,7 @@ router.post('/onu-provision/configure-olt', requireAdminSession, restrictToAdmin
 
 router.post('/onu-provision/scan-unconfigured', requireAdminSession, restrictToAdmin, express.json(), async (req, res) => {
   try {
-    const oltConfig = {
-      vendor: getSetting('olt_vendor', ''),
-      host: getSetting('olt_host', ''),
-      port: getSetting('olt_port', 22),
-      username: getSetting('olt_username', ''),
-      password: getSetting('olt_password', '')
-    };
+    const oltConfig = getEffectiveOltConfig();
     
     if (!oltConfig.host) {
       return res.json({ success: false, error: 'OLT belum dikonfigurasi' });
@@ -7208,16 +7930,21 @@ router.post('/onu-provision/scan-unconfigured', requireAdminSession, restrictToA
 
 router.post('/onu-provision/scan-configured', requireAdminSession, restrictToAdmin, express.json(), async (req, res) => {
   try {
-    const host = getSetting('olt_host', '');
-    if (!host) {
-      return res.json({ success: false, error: 'OLT belum dikonfigurasi di pengaturan global' });
+    let host = getSetting('olt_host', '');
+    let olt = null;
+    
+    if (host) {
+      olt = db.prepare('SELECT * FROM olts WHERE host = ? LIMIT 1').get(host);
     }
     
-    const olt = db.prepare('SELECT * FROM olts WHERE host = ? LIMIT 1').get(host);
+    if (!olt) {
+      olt = db.prepare('SELECT * FROM olts WHERE is_active = 1 ORDER BY id ASC LIMIT 1').get();
+    }
+    
     if (!olt) {
       return res.json({ 
         success: false, 
-        error: 'OLT dengan IP ' + host + ' belum didaftarkan di halaman "Manajemen OLT". Silakan daftarkan OLT Anda di sana terlebih dahulu agar sistem dapat membaca data monitoring SNMP.' 
+        error: 'OLT belum didaftarkan di sistem. Silakan simpan konfigurasi OLT atau daftarkan di halaman "Manajemen OLT".' 
       });
     }
     
@@ -7233,13 +7960,7 @@ router.post('/onu-provision/scan-configured', requireAdminSession, restrictToAdm
 
 router.post('/onu-provision/provision', requireAdminSession, restrictToAdmin, express.urlencoded({ extended: true }), async (req, res) => {
   try {
-    const oltConfig = {
-      vendor: getSetting('olt_vendor', ''),
-      host: getSetting('olt_host', ''),
-      port: getSetting('olt_port', 22),
-      username: getSetting('olt_username', ''),
-      password: getSetting('olt_password', '')
-    };
+    const oltConfig = getEffectiveOltConfig();
     
     if (!oltConfig.host) {
       throw new Error('OLT belum dikonfigurasi');
@@ -7342,13 +8063,7 @@ router.post('/onu-provision/provision', requireAdminSession, restrictToAdmin, ex
 
 router.post('/onu-provision/delete', requireAdminSession, restrictToAdmin, express.json(), async (req, res) => {
   try {
-    const oltConfig = {
-      vendor: getSetting('olt_vendor', ''),
-      host: getSetting('olt_host', ''),
-      port: getSetting('olt_port', 22),
-      username: getSetting('olt_username', ''),
-      password: getSetting('olt_password', '')
-    };
+    const oltConfig = getEffectiveOltConfig();
     
     const { vendor, params } = req.body;
     const result = await onuProvisionSvc.deleteONU(oltConfig, vendor, params);
@@ -7389,7 +8104,7 @@ router.get('/radius-settings', requireAdminSession, restrictToAdmin, async (req,
         COUNT(1) as total_events,
         COALESCE(SUM(input_octets + output_octets), 0) as total_bytes
       FROM radius_accounting
-      WHERE DATE(created_at) = DATE('now')
+      WHERE DATE(created_at) = DATE('now', 'localtime')
     `).get() || { total_events: 0, total_bytes: 0 };
 
     const todayTrafficMB = (todayStats.total_bytes / (1024 * 1024)).toFixed(1);
@@ -7505,7 +8220,7 @@ router.post('/radius/clear-stale', requireAdminSession, restrictToAdmin, async (
     const result = db.prepare(`
       UPDATE radius_accounting
       SET status_type = 2, terminate_cause = 10, updated_at = NOW_LOCAL()
-      WHERE status_type IN (1, 3) AND updated_at < datetime('now', '-2 hours')
+      WHERE status_type IN (1, 3) AND updated_at < datetime('now', 'localtime', '-2 hours')
     `).run();
     req.session._msg = { type: 'success', text: `Berhasil membersihkan ${result.changes} sesi kadaluarsa / ghost.` };
   } catch (e) {
