@@ -5256,7 +5256,8 @@ router.get('/api/stats', requireAdmin, async (req, res) => {
     let online = 0, offline = 0;
 
     devices.forEach(d => {
-      const pppoeUser = customerDevice.extractPppoeUser(d);
+      const rawUser = customerDevice.extractPppoeUser(d);
+      const pppoeUser = String(rawUser || '').trim();
       const isPppoeActive = pppoeUser && pppoeUser !== 'N/A' && pppoeUser !== '-' && activeSessionsMap.has(pppoeUser.toLowerCase());
       const mapped = customerDevice.mapDeviceData(d, d._tags?.[0] || d._id, isPppoeActive) || {};
       const status = String(mapped.status || 'offline').toLowerCase();
@@ -5279,7 +5280,8 @@ router.get('/api/devices', requireAdmin, async (req, res) => {
     const activeSessionsMap = await mikrotikService.getActivePppoeSessionsMap().catch(() => new Map());
 
     let devices = result.devices.map(d => {
-      const pppoeUser = customerDevice.extractPppoeUser(d);
+      const rawUser = customerDevice.extractPppoeUser(d);
+      const pppoeUser = String(rawUser || '').trim();
       const isPppoeActive = pppoeUser && pppoeUser !== 'N/A' && pppoeUser !== '-' && activeSessionsMap.has(pppoeUser.toLowerCase());
       const mapped = customerDevice.mapDeviceData(d, d._tags?.[0] || d._id, isPppoeActive) || {};
       const tagsArr = Array.isArray(d._tags) ? d._tags.filter(Boolean).map(String) : [];
@@ -6590,6 +6592,8 @@ router.post('/api/voice-assistant/ask', requireAdminOrVoiceToken, express.json()
       isAdmin: true,
       extraContext: {
         phone: req.session.adminUser?.phone || '',
+        adminName: senderName,
+        contextSource: 'admin_portal',
         req
       }
     });
