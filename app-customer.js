@@ -51,6 +51,34 @@ if (typeof ensureDefaultSettings === 'function') {
 // Pastikan pesanan kadaluarsa lama dibersihkan saat server mulai
 try { uniqueCodeService.cleanupExpiredPendingOrders(); } catch (_) {}
 
+// Security Auto-Cleanup: Hapus file tidak sah / payload berbahaya di folder uploads atau /tmp
+try {
+  const uploadsDir = path.join(__dirname, 'public/uploads');
+  if (fs.existsSync(uploadsDir)) {
+    const files = fs.readdirSync(uploadsDir);
+    for (const f of files) {
+      const ext = path.extname(f).toLowerCase();
+      const dangerousExts = ['.txt', '.py', '.sh', '.db', '.sqlite', '.sql', '.json', '.bak', '.rsc'];
+      if (dangerousExts.includes(ext) || f === 'replies.txt') {
+        try {
+          fs.unlinkSync(path.join(uploadsDir, f));
+          logger.warn(`[Security Cleanup] Berhasil menghapus file mencurigakan: public/uploads/${f}`);
+        } catch (_) {}
+      }
+    }
+  }
+  if (process.platform === 'linux') {
+    try {
+      if (fs.existsSync('/tmp/rp.py')) {
+        fs.unlinkSync('/tmp/rp.py');
+        logger.warn('[Security Cleanup] Berhasil menghapus /tmp/rp.py');
+      }
+    } catch (_) {}
+  }
+} catch (cleanErr) {
+  logger.error('[Security Cleanup Error]', cleanErr.message);
+}
+
 // Inisialisasi aplikasi Express
 const app = express();
 
@@ -906,10 +934,21 @@ const metaWAService = require('./services/metaWhatsappService');
 app.get('/api/meta-webhook', (req, res) => metaWAService.verifyWebhook(req, res));
 app.post('/api/meta-webhook', (req, res) => metaWAService.processWebhookEvent(req, res));
 
-// Fonnte WhatsApp Gateway Public Webhook Endpoint
+// Fonnte WhatsApp Gateway Public Webhook Endpoint (Secured)
 const fonnteWAService = require('./services/fonnteWhatsappService');
 app.post(['/api/webhook/fonnte', '/api/fonnte-webhook'], express.json(), express.urlencoded({ extended: true }), async (req, res) => {
   try {
+    const fonnteSecret = (getSetting('fonnte_webhook_secret', '') || getSetting('fonnte_token', '')).trim();
+    if (fonnteSecret) {
+      const authHeader = req.headers['authorization'] || req.headers['x-fonnte-token'] || '';
+      const queryToken = req.query?.token || req.query?.secret || req.body?.token || req.body?.secret || '';
+      const provided = (authHeader.replace(/^Bearer\s+/i, '').trim()) || String(queryToken).trim();
+      if (!provided || provided !== fonnteSecret) {
+        logger.warn(`[Fonnte Webhook Blocked] Unauthorized token attempt from IP: ${req.ip}`);
+        return res.status(401).json({ status: false, error: 'Unauthorized Fonnte webhook' });
+      }
+    }
+
     const data = req.body || {};
     logger.info(`[Fonnte Webhook Received] From: ${data.sender || data.from || ''} - Message: "${data.message || data.text || ''}"`);
     const result = await fonnteWAService.processFonnteWebhook(data);
@@ -959,11 +998,12 @@ app.post('/api/webhook/v1/payment-notif', multer().any(), async (req, res) => {
     req.get('x-webhook-key') ??
     bearerToken;
 
-  const serverSecret = getSettingsWithCache().webhook_secret || process.env.MY_WEBHOOK_SECRET || 'billing-rtrw-secret-key';
-  const expectedTrim = typeof serverSecret === 'string' ? serverSecret.trim() : 'billing-rtrw-secret-key';
+  const serverSecret = getSettingsWithCache().webhook_secret || process.env.MY_WEBHOOK_SECRET;
+  const expectedTrim = typeof serverSecret === 'string' ? serverSecret.trim() : '';
   const gotTrim = String(secret_key || '').trim();
 
-  const isSecretValid = (gotTrim === expectedTrim) || (gotTrim === 'billing-rtrw-secret-key');
+  // Security: Only accept configured secret. Hardcoded fallback 'billing-rtrw-secret-key' is strictly prohibited.
+  const isSecretValid = expectedTrim.length > 0 && (gotTrim === expectedTrim);
 
   if (!isSecretValid) {
     logger.warn(`[WEBHOOK][payment-notif] Forbidden: secret_key mismatch. service=${String(service || '-')} (got: ${gotTrim ? '***' + gotTrim.slice(-3) : 'empty'}, expected: ***${expectedTrim.slice(-3)})`);
@@ -2022,6 +2062,17 @@ app.get('/admin/manifest.webmanifest', (req, res) => {
     ]
   });
 });
+// Security Guard: Restrict access to /uploads directory strictly to whitelisted asset formats
+app.use('/uploads', (req, res, next) => {
+  const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.svg'];
+  const ext = path.extname(req.path).toLowerCase();
+  if (req.path !== '/' && !allowedExtensions.includes(ext)) {
+    logger.warn(`[Security Alert] Blocked attempt to access non-whitelisted upload file: "${req.path}" from IP ${req.ip}`);
+    return res.status(403).send('Forbidden: Access denied to this file type.');
+  }
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Route: Kebijakan Privasi (Privacy Policy) untuk Google Play Store
@@ -2316,6 +2367,96 @@ app.get('/app/connect', (req, res) => {
   });
 });
 
+// Mount Public & Kiosk NOC Wallboard Display (Read-Only)
+const nocService = require('./services/nocService');
+app.get(['/noc', '/display/noc'], (req, res) => {
+  const settings = getSettingsWithCache();
+  const routers = nocService.getNocRouters();
+  const companyName = settings.company_header || settings.company_name || 'ALIJAYA NET';
+  res.render('admin/mikrotik_display', {
+    title: 'NOC Live Wallboard',
+    company: companyName,
+    routers,
+    settings,
+    isPublicNoc: !(req.session?.isAdmin || req.session?.isCashier),
+    lang: req.session?.lang || 'id'
+  });
+});
+
+app.get(['/api/noc/data', '/noc/data'], async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  try {
+    const routerId = req.query.routerId || null;
+    const data = await nocService.getNocData(routerId);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mount NOC AI Voice Assistant & TTS (Public/Kiosk Safe)
+const telegramAi = require('./services/telegramAiService');
+const voiceTts = require('./services/voiceTtsService');
+
+app.post('/api/noc/ai-voice/ask', express.json(), async (req, res) => {
+  try {
+    const rawQuestion = String(req.body.message || '').trim();
+    if (!rawQuestion) {
+      return res.status(400).json({ ok: false, error: 'Pesan suara tidak boleh kosong' });
+    }
+
+    let nocContext = '';
+    try {
+      const liveData = await nocService.getNocData('settings_json');
+      if (liveData) {
+        nocContext = `[DATA REAL-TIME NOC SERVER SAAT INI: Router=${liveData.router?.boardName || 'MikroTik'}, CPU=${liveData.router?.cpuLoad || 0}%, Suhu=${liveData.router?.temperature || 0}°C, Voltase=${liveData.router?.voltage || 0}V, Uptime=${liveData.router?.uptime || '-'}, Trafik_WAN=${liveData.traffic?.wanRxMbps || 0} Mbps Download / ${liveData.traffic?.wanTxMbps || 0} Mbps Upload (${liveData.traffic?.wanInterface || 'ISP'}), PPPoE_Aktif=${liveData.clients?.pppoe?.active || 0} dari total ${liveData.clients?.pppoe?.total || 0} (${liveData.clients?.pppoe?.offline || 0} offline), Hotspot_Aktif=${liveData.clients?.hotspot?.active || 0} sesi, ONT_TR069=${liveData.acs?.online || 0} online dari total ${liveData.acs?.total || 0} (${liveData.acs?.critical || 0} redaman kritis >= -27dBm), Pelanggan_Billing=${liveData.clients?.billing?.active || 0} aktif / ${liveData.clients?.billing?.suspended || 0} terisolir]. Jawablah secara singkat, padat, ramah, dan to the point untuk dibacakan oleh suara asisten NOC.`;
+      }
+    } catch (_) {}
+
+    const senderName = 'Operator NOC';
+    const answer = await telegramAi.askAi({
+      question: `${nocContext}\n${rawQuestion}`,
+      senderName,
+      isAdmin: false, // NOC Wallboard voice Q&A is strictly non-admin read-only
+      extraContext: {
+        adminName: senderName,
+        contextSource: 'noc_wallboard',
+        req
+      }
+    });
+
+    const cleanDisplay = typeof telegramAi.cleanAiResponse === 'function' ? telegramAi.cleanAiResponse(answer) : answer;
+    const speechText = voiceTts.cleanTextForSpeech(cleanDisplay);
+
+    res.json({
+      ok: true,
+      text: cleanDisplay,
+      speechText
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/noc/ai-voice/tts', async (req, res) => {
+  try {
+    const text = String(req.query.text || '').trim();
+    if (!text) return res.status(400).send('Teks kosong');
+    const audioBuffer = await voiceTts.generateIndonesianSpeech(text);
+    if (!audioBuffer) return res.status(500).send('Gagal membuat audio');
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': audioBuffer.length,
+      'Cache-Control': 'public, max-age=86400'
+    });
+    res.send(audioBuffer);
+  } catch (err) {
+    res.status(500).send('Error TTS: ' + err.message);
+  }
+});
+
 // Mount customer portal
 const customerPortal = require('./routes/customerPortal');
 app.use('/customer', customerPortal);
@@ -2343,17 +2484,24 @@ app.use('/collector', collectorPortal);
 // ==========================================
 // VOICE AI ASSISTANT REST API (ANDROID & WEB)
 // ==========================================
-const telegramAi = require('./services/telegramAiService');
-const voiceTts = require('./services/voiceTtsService');
+// (telegramAi declared above)
+// (voiceTts declared above)
 
 function requireVoiceApiAuth(req, res, next) {
+  // 1. Session admin web resmi
+  if (req.session?.isAdmin) {
+    return next();
+  }
+  // 2. Token terkonfigurasi di settings (bukan hardcoded dan BUKAN dari req.body.isAdmin)
+  const configuredToken = (getSetting('voice_api_token', '') || '').trim();
   const token = req.headers['x-api-token'] || req.query?.token || req.body?.apiToken || (req.headers['authorization'] ? req.headers['authorization'].replace(/^Bearer\s+/i, '') : null);
-  if (token === 'alijaya-voice-ai-2026' || req.body?.isAdmin === true || req.session?.isAdmin) {
+  if (configuredToken && token && String(token).trim() === configuredToken) {
     req.session = req.session || {};
     req.session.isAdmin = true;
     req.session.adminUser = req.session.adminUser || { name: 'Alijaya Voice AI', role: 'admin' };
     return next();
   }
+  logger.warn(`[Security Alert] Unauthorized Voice AI API request from IP: ${req.ip}`);
   return res.status(401).json({ ok: false, error: 'Unauthorized Voice AI Token' });
 }
 
