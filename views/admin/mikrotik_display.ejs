@@ -1482,6 +1482,7 @@
             <span id="ont-bar-online">Online: 0</span>
             <span id="ont-bar-critical" style="color:var(--rose)">Kritis: 0</span>
           </div>
+          <div id="ont-servers-breakdown" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.06);font-size:8px;color:var(--text-dim)"></div>
         </div>
 
         <!-- Billing Customers Status -->
@@ -1868,6 +1869,28 @@
       }
       loadData();
       startPolling();
+
+      // Android TV Leanback detection: hide unnecessary desktop buttons on TV screen
+      if (navigator.userAgent.includes('AlijayaNocTV')) {
+        const apkBtn = document.querySelector('a[href*="noc-tv"]');
+        if (apkBtn) apkBtn.style.display = 'none';
+        const exitBtn = document.querySelector('a[href="/admin/mikrotik"]');
+        if (exitBtn) exitBtn.style.display = 'none';
+      }
+
+      // TV Remote & Keyboard Shortcuts: 1..5 for Theme, V for Voice, A for Audio, R for Cycle, F for Fullscreen
+      document.addEventListener('keydown', (e) => {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+        if (e.key === '1') switchTheme('cyberpunk');
+        else if (e.key === '2') switchTheme('matrix');
+        else if (e.key === '3') switchTheme('sapphire');
+        else if (e.key === '4') switchTheme('amoled');
+        else if (e.key === '5') switchTheme('amber');
+        else if (e.key === 'v' || e.key === 'V') toggleNocVoice();
+        else if (e.key === 'a' || e.key === 'A') toggleAudioAlert();
+        else if (e.key === 'r' || e.key === 'R') toggleAutoCycle();
+        else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+      });
     });
 
     // High-Tech Digital Clock
@@ -2459,6 +2482,21 @@
         document.getElementById('ont-bar-fill').style.width = `${ontPercent}%`;
         document.getElementById('ont-bar-online').textContent = `Online: ${acs.online || 0} / ${acs.total || 0}`;
         document.getElementById('ont-bar-critical').textContent = `Kritis: ${acs.critical || 0}`;
+
+        const ontServersBox = document.getElementById('ont-servers-breakdown');
+        if (ontServersBox) {
+          if (Array.isArray(acs.servers) && acs.servers.length > 0) {
+            ontServersBox.innerHTML = acs.servers.map(s => {
+              const label = String(s.name || 'ACS').replace('GenieACS API', 'GenieACS');
+              return `<span style="background:rgba(255,255,255,0.05);padding:1px 5px;border-radius:3px;white-space:nowrap" title="${s.name}: ${s.online} Online / ${s.total} Total">
+                <i class="bi bi-hdd-network" style="color:var(--cyan);font-size:7.5px"></i> ${label}: <b style="color:var(--text-light)">${s.online}/${s.total}</b>
+              </span>`;
+            }).join('');
+            ontServersBox.style.display = 'flex';
+          } else {
+            ontServersBox.style.display = 'none';
+          }
+        }
 
         document.getElementById('cust-active-val').textContent = `${billing.active || 0} Pelanggan`;
         document.getElementById('cust-suspended-val').textContent = `${billing.suspended || 0} Pelanggan`;

@@ -51,15 +51,16 @@ if (typeof ensureDefaultSettings === 'function') {
 // Pastikan pesanan kadaluarsa lama dibersihkan saat server mulai
 try { uniqueCodeService.cleanupExpiredPendingOrders(); } catch (_) {}
 
-// Security Auto-Cleanup: Hapus file tidak sah / payload berbahaya di folder uploads atau /tmp
+// Security Auto-Cleanup: Hapus file tidak sah / payload berbahaya di folder uploads, qris, atau /tmp
 try {
+  // Bersihkan file mencurigakan di public/uploads
   const uploadsDir = path.join(__dirname, 'public/uploads');
   if (fs.existsSync(uploadsDir)) {
     const files = fs.readdirSync(uploadsDir);
     for (const f of files) {
       const ext = path.extname(f).toLowerCase();
-      const dangerousExts = ['.txt', '.py', '.sh', '.db', '.sqlite', '.sql', '.json', '.bak', '.rsc'];
-      if (dangerousExts.includes(ext) || f === 'replies.txt') {
+      const dangerousExts = ['.txt', '.py', '.sh', '.db', '.sqlite', '.sql', '.json', '.bak', '.rsc', '.err', '.log'];
+      if (dangerousExts.includes(ext) || f === 'replies.txt' || f.includes('tz_watch')) {
         try {
           fs.unlinkSync(path.join(uploadsDir, f));
           logger.warn(`[Security Cleanup] Berhasil menghapus file mencurigakan: public/uploads/${f}`);
@@ -67,11 +68,49 @@ try {
       }
     }
   }
+
+  // Bersihkan skrip jahat / tipzy yang disuntikkan di folder scripts/
+  const scriptsDir = path.join(__dirname, 'scripts');
+  if (fs.existsSync(scriptsDir)) {
+    const sFiles = fs.readdirSync(scriptsDir);
+    for (const sf of sFiles) {
+      if (sf.toLowerCase().includes('tipzy') || sf.toLowerCase().includes('rp') || sf.startsWith('attack') || sf.endsWith('.py')) {
+        try {
+          fs.unlinkSync(path.join(scriptsDir, sf));
+          logger.warn(`[Security Cleanup] Berhasil menghapus skrip penyerang: scripts/${sf}`);
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Bersihkan QRIS upload palsu di public/uploads/qris
+  const qrisUploadsDir = path.join(__dirname, 'public/uploads/qris');
+  if (fs.existsSync(qrisUploadsDir)) {
+    const qrisFiles = fs.readdirSync(qrisUploadsDir);
+    for (const qf of qrisFiles) {
+      const qPath = path.join(qrisUploadsDir, qf);
+      try {
+        const buf = fs.readFileSync(qPath);
+        const str = buf.toString('latin1');
+        if (str.includes('Boku Labs') || str.includes('ID1026517082354') || str.includes('G563443239') || str.includes('COM.GO-JEK.WWW')) {
+          fs.unlinkSync(qPath);
+          logger.warn(`[Security Cleanup] Berhasil menghapus QRIS palsu penyerang: public/uploads/qris/${qf}`);
+        }
+      } catch (_) {}
+    }
+  }
+
+  // Bersihkan temporary attack scripts di /tmp (Linux)
   if (process.platform === 'linux') {
     try {
-      if (fs.existsSync('/tmp/rp.py')) {
-        fs.unlinkSync('/tmp/rp.py');
-        logger.warn('[Security Cleanup] Berhasil menghapus /tmp/rp.py');
+      const tmpFiles = fs.readdirSync('/tmp');
+      for (const tf of tmpFiles) {
+        if (tf.startsWith('rp') || tf.startsWith('tipzy') || tf.endsWith('.py') || tf.endsWith('.sh')) {
+          try {
+            fs.unlinkSync(path.join('/tmp', tf));
+            logger.warn(`[Security Cleanup] Berhasil menghapus file mencurigakan di /tmp: ${tf}`);
+          } catch (_) {}
+        }
       }
     } catch (_) {}
   }
@@ -103,6 +142,7 @@ app.use(express.urlencoded({
 }));
 app.use(express.text({
   type: (req) => {
+    if (req.method === 'GET' || req.method === 'HEAD') return false;
     const contentType = req.headers['content-type'] || '';
     if (contentType.includes('multipart/form-data')) return false;
     if (contentType.includes('application/x-www-form-urlencoded')) return false;

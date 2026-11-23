@@ -6,6 +6,7 @@
  */
 
 const os = require('os');
+const axios = require('axios');
 const db = require('../config/database');
 const mikrotikService = require('./mikrotikService');
 const { getSetting, getSettings } = require('../config/settingsManager');
@@ -15,6 +16,208 @@ const { logger } = require('../config/logger');
 let cachedData = null;
 let lastFetchTime = 0;
 const CACHE_TTL_MS = 1000; // 1 second cache
+
+let cachedBlockedCount = 0;
+let lastBlockedCountCheck = 0;
+let lastClientActivityTime = 0;
+
+// Multi-server TR-069 ACS cache (Built-in ACS, GenieACS API 7557 & Multi-servers)
+let cachedAcsStats = { total: 0, online: 0, critical: 0, servers: [] };
+let lastAcsFetchTime = 0;
+let isAcsFetching = false;
+const ACS_CACHE_TTL_MS = 15000; // 15 seconds cache so HTTP requests never block real-time graphs
+
+/**
+ * Fetch and aggregate TR-069 device statistics across:
+ * 1. Local Built-in ACS (acs_devices table)
+ * 2. Default GenieACS (API 7557 via genieacs_url)
+ * 3. Active multi-servers from genieacs_servers table
+ */
+async function fetchMultiServerAcsStats() {
+  const tenMinutesAgo = Date.now() - 15 * 60 * 1000;
+  const deviceMap = new Map(); // key -> { id, sn, isOnline, isCritical, server }
+  const serversStats = [];
+  const settings = getSettings();
+
+  // 1. Built-in ACS (Local SQLite acs_devices)
+  let builtinTotal = 0, builtinOnline = 0, builtinCritical = 0;
+  try {
+    const rows = db.prepare('SELECT id, serial_number, last_inform, params FROM acs_devices').all();
+    builtinTotal = rows.length;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const isOnline = Boolean(r.last_inform && new Date(r.last_inform).getTime() >= tenMinutesAgo);
+      if (isOnline) builtinOnline++;
+      let isCritical = false;
+      try {
+        const p = JSON.parse(r.params || '{}');
+        const rx = parseFloat(p.rx_power || p.optical_rx_power || p.rxPower);
+        if (!isNaN(rx) && rx <= -27) isCritical = true;
+      } catch (_) {}
+      if (isCritical) builtinCritical++;
+
+      const key = String(r.serial_number || r.id || '').trim().toLowerCase();
+      if (key) {
+        deviceMap.set(key, { id: r.id, sn: r.serial_number, isOnline, isCritical, server: 'Built-in ACS' });
+      }
+    }
+    serversStats.push({ name: 'Built-in ACS', total: builtinTotal, online: builtinOnline, critical: builtinCritical });
+  } catch (e) {
+    logger.debug(`[NOC Service] Built-in ACS stats error: ${e.message}`);
+  }
+
+  // 2. Default GenieACS (API 7557 via genieacs_url)
+  const genieUrl = settings.genieacs_url || '';
+  if (genieUrl) {
+    let genieTotal = 0, genieOnline = 0, genieCritical = 0;
+    try {
+      const baseUrl = genieUrl.endsWith('/') ? genieUrl.slice(0, -1) : genieUrl;
+      const auth = (settings.genieacs_username && settings.genieacs_password) ? {
+        username: settings.genieacs_username,
+        password: settings.genieacs_password
+      } : undefined;
+
+      const res = await axios.get(`${baseUrl}/devices`, {
+        params: {
+          projection: '_id,_lastInform,_deviceId._SerialNumber,VirtualParameters.RXPower,VirtualParameters.redaman,VirtualParameters.rx_power,VirtualParameters.RxPower,VirtualParameters.optical_rx_power'
+        },
+        auth,
+        timeout: 4500
+      });
+
+      if (Array.isArray(res.data)) {
+        genieTotal = res.data.length;
+        for (let i = 0; i < res.data.length; i++) {
+          const d = res.data[i];
+          const isOnline = Boolean(d._lastInform && new Date(d._lastInform).getTime() >= tenMinutesAgo);
+          if (isOnline) genieOnline++;
+
+          let rxVal = null;
+          const vp = d.VirtualParameters || {};
+          for (const k of ['RXPower', 'redaman', 'rx_power', 'RxPower', 'optical_rx_power']) {
+            if (vp[k] !== undefined && vp[k] !== null) {
+              const raw = typeof vp[k] === 'object' ? vp[k]._value : vp[k];
+              const num = parseFloat(raw);
+              if (!isNaN(num)) { rxVal = num; break; }
+            }
+          }
+          const isCritical = rxVal !== null && rxVal <= -27;
+          if (isCritical) genieCritical++;
+
+          const sn = (d._deviceId && d._deviceId._SerialNumber) ? d._deviceId._SerialNumber : d._id;
+          const key = String(sn || d._id || '').trim().toLowerCase();
+          if (key) {
+            const existing = deviceMap.get(key);
+            if (existing) {
+              existing.isOnline = existing.isOnline || isOnline;
+              existing.isCritical = existing.isCritical || isCritical;
+            } else {
+              deviceMap.set(key, { id: d._id, sn, isOnline, isCritical, server: 'GenieACS (7557)' });
+            }
+          }
+        }
+      }
+      serversStats.push({ name: 'GenieACS (7557)', total: genieTotal, online: genieOnline, critical: genieCritical });
+    } catch (e) {
+      logger.debug(`[NOC Service] GenieACS 7557 error: ${e.message}`);
+      serversStats.push({ name: 'GenieACS (7557)', total: 0, online: 0, critical: 0, error: e.message });
+    }
+  }
+
+  // 3. Multi-server from genieacs_servers table
+  try {
+    const extraServers = db.prepare('SELECT * FROM genieacs_servers WHERE status = ?').all('active');
+    for (let i = 0; i < extraServers.length; i++) {
+      const s = extraServers[i];
+      if (!s.url || s.url === 'local' || s.url.replace(/\/+$/, '') === (genieUrl || '').replace(/\/+$/, '')) {
+        continue;
+      }
+      let sTotal = 0, sOnline = 0, sCritical = 0;
+      try {
+        const baseUrl = s.url.endsWith('/') ? s.url.slice(0, -1) : s.url;
+        const auth = (s.username && s.password) ? { username: s.username, password: s.password } : undefined;
+        const res = await axios.get(`${baseUrl}/devices`, {
+          params: { projection: '_id,_lastInform,_deviceId._SerialNumber,VirtualParameters' },
+          auth,
+          timeout: 4500
+        });
+        if (Array.isArray(res.data)) {
+          sTotal = res.data.length;
+          for (let j = 0; j < res.data.length; j++) {
+            const d = res.data[j];
+            const isOnline = Boolean(d._lastInform && new Date(d._lastInform).getTime() >= tenMinutesAgo);
+            if (isOnline) sOnline++;
+            let rxVal = null;
+            const vp = d.VirtualParameters || {};
+            for (const k of ['RXPower', 'redaman', 'rx_power', 'RxPower', 'optical_rx_power']) {
+              if (vp[k] !== undefined && vp[k] !== null) {
+                const raw = typeof vp[k] === 'object' ? vp[k]._value : vp[k];
+                const num = parseFloat(raw);
+                if (!isNaN(num)) { rxVal = num; break; }
+              }
+            }
+            const isCritical = rxVal !== null && rxVal <= -27;
+            if (isCritical) sCritical++;
+
+            const sn = (d._deviceId && d._deviceId._SerialNumber) ? d._deviceId._SerialNumber : d._id;
+            const key = String(sn || d._id || '').trim().toLowerCase();
+            if (key) {
+              const existing = deviceMap.get(key);
+              if (existing) {
+                existing.isOnline = existing.isOnline || isOnline;
+                existing.isCritical = existing.isCritical || isCritical;
+              } else {
+                deviceMap.set(key, { id: d._id, sn, isOnline, isCritical, server: s.name });
+              }
+            }
+          }
+        }
+        serversStats.push({ name: s.name, total: sTotal, online: sOnline, critical: sCritical });
+      } catch (err) {
+        serversStats.push({ name: s.name, total: 0, online: 0, critical: 0, error: err.message });
+      }
+    }
+  } catch (e) {
+    logger.debug(`[NOC Service] Multi-server query error: ${e.message}`);
+  }
+
+  let totalUnique = deviceMap.size;
+  let totalOnline = 0;
+  let totalCritical = 0;
+  for (const dev of deviceMap.values()) {
+    if (dev.isOnline) totalOnline++;
+    if (dev.isCritical) totalCritical++;
+  }
+
+  cachedAcsStats = {
+    total: totalUnique,
+    online: totalOnline,
+    critical: totalCritical,
+    servers: serversStats,
+    lastUpdated: Date.now()
+  };
+  lastAcsFetchTime = Date.now();
+  return cachedAcsStats;
+}
+
+async function getAggregatedAcsStats() {
+  const now = Date.now();
+  if (now - lastAcsFetchTime > ACS_CACHE_TTL_MS) {
+    if (!isAcsFetching) {
+      isAcsFetching = true;
+      fetchMultiServerAcsStats().catch(() => {}).finally(() => {
+        isAcsFetching = false;
+      });
+    }
+  }
+  // If first call, await once
+  if (lastAcsFetchTime === 0) {
+    try {
+      await fetchMultiServerAcsStats();
+    } catch (_) {}
+  }
+  return cachedAcsStats;
+}
 
 // In-memory traffic rate tracking per router and interface
 // previousTrafficSamples: routerId -> Map(ifaceName -> { bytesIn, bytesOut, time })
@@ -46,8 +249,12 @@ function getNocRouters() {
 /**
  * Gather complete real-time NOC metrics
  * @param {string|number} routerId 
+ * @param {boolean} isUserRequest
  */
-async function getNocData(routerId = null) {
+async function getNocData(routerId = null, isUserRequest = true) {
+  if (isUserRequest) {
+    lastClientActivityTime = Date.now();
+  }
   const effectiveRouterId = (routerId && routerId !== 'null' && routerId !== 'settings' && routerId !== 'settings_json')
     ? (isNaN(Number(routerId)) ? routerId : Number(routerId))
     : 'settings_json';
@@ -277,28 +484,14 @@ async function getNocData(routerId = null) {
     const activeHotspotCount = Array.isArray(activeHotspotRaw) ? activeHotspotRaw.length : 0;
     const totalHotspotUsers = Array.isArray(hotspotUsersRaw) ? hotspotUsersRaw.length : 0;
 
-    // Database Queries (TR-069 ACS, Billing Customers & Firewall Blocks)
-    let acsStats = { total: 0, online: 0, critical: 0 };
+    // Multi-Server TR-069 ACS Aggregation
+    const acsStats = await getAggregatedAcsStats();
+
+    // Database Queries (Billing Customers & Firewall Blocks)
     let customerStats = { total: 0, active: 0, suspended: 0 };
     let securityStats = { blockedCount: 0 };
 
     try {
-      // 1. TR-069 stats
-      const devRows = db.prepare('SELECT params, last_inform FROM acs_devices').all();
-      acsStats.total = devRows.length;
-      const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
-      for (const d of devRows) {
-        if (d.last_inform && new Date(d.last_inform).getTime() >= tenMinutesAgo) {
-          acsStats.online++;
-        }
-        try {
-          const p = JSON.parse(d.params || '{}');
-          const rx = parseFloat(p.rx_power || p.optical_rx_power || p.rxPower);
-          if (!isNaN(rx) && rx <= -27) {
-            acsStats.critical++;
-          }
-        } catch (_) {}
-      }
 
       // 2. Billing customer stats
       const cRows = db.prepare("SELECT status, COUNT(*) as c FROM customers GROUP BY status").all();
@@ -308,10 +501,14 @@ async function getNocData(routerId = null) {
         if (r.status === 'suspended' || r.status === 'isolated') customerStats.suspended += r.c;
       }
 
-      // 3. Security watchdog blocked count
+      // 3. Security watchdog blocked count (cached for 30s to prevent repetitive full table scans)
       try {
-        const secRow = db.prepare("SELECT COUNT(*) as c FROM audit_trail WHERE action LIKE '%BLOCK%' OR action LIKE '%BRUTE%'").get();
-        if (secRow) securityStats.blockedCount = secRow.c;
+        if (now - lastBlockedCountCheck > 30000) {
+          const secRow = db.prepare("SELECT COUNT(*) as c FROM audit_trail WHERE action LIKE '%BLOCK%' OR action LIKE '%BRUTE%'").get();
+          if (secRow) cachedBlockedCount = secRow.c;
+          lastBlockedCountCheck = now;
+        }
+        securityStats.blockedCount = cachedBlockedCount;
       } catch (_) {}
     } catch (dbErr) {
       logger.debug(`[NOC Service] DB query error: ${dbErr.message}`);
@@ -409,16 +606,21 @@ async function getNocData(routerId = null) {
   }
 }
 
-// Background sampler so traffic history is always warm and accurate
+// Background sampler so traffic history is always warm and accurate while NOC is active
 let backgroundSamplerStarted = false;
 function ensureBackgroundSampler() {
   if (backgroundSamplerStarted) return;
   backgroundSamplerStarted = true;
   setInterval(async () => {
+    // Only sample if a user/dashboard has requested NOC data within the last 2 minutes
+    const now = Date.now();
+    if (now - lastClientActivityTime > 2 * 60 * 1000) {
+      return; // Idle mode: save CPU and MikroTik API resources
+    }
     try {
-      await getNocData('settings_json');
+      await getNocData('settings_json', false);
     } catch (_) {}
-  }, 2200);
+  }, 2500);
 }
 ensureBackgroundSampler();
 
